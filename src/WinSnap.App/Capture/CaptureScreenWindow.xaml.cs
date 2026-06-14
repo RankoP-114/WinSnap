@@ -472,8 +472,10 @@ public partial class CaptureScreenWindow : Window
 
     private void OnToolbarMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
-        if (_toolbarDragging)
-            EndToolbarDrag();
+        if (!_toolbarDragging)
+            return;
+
+        EndToolbarDrag();
         e.Handled = true;
     }
 
