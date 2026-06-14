@@ -10,7 +10,6 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <RootNamespace>WinSnap.App</RootNamespace>
     <AssemblyName>WinSnap</AssemblyName>
-    <ApplicationIcon>Assets\WinSnap.ico</ApplicationIcon>
     <!-- DPI 感知由 app.manifest 的 PerMonitorV2 声明（WPF 所需）；WinForms 分析器的
          WFO0003 建议改用 SetHighDpiMode 不适用于本 WPF 应用，故抑制 -->
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
@@ -27,11 +26,6 @@
   <ItemGroup>
     <ProjectReference Include="..\WinSnap.Core\WinSnap.Core.csproj" />
     <ProjectReference Include="..\WinSnap.Interop\WinSnap.Interop.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- 应用图标：同时作为 WPF 资源，供托盘运行时加载 -->
-    <Resource Include="Assets\WinSnap.ico" />
   </ItemGroup>
 
   <ItemGroup>

@@ -14,7 +14,6 @@
 #define MyAppVersion AppVersion
 #define MyAppPublisher "WinSnap"
 #define MyAppExeName "WinSnap.exe"
-#define MyAppIcon "..\..\src\WinSnap.App\Assets\WinSnap.ico"
 
 [Setup]
 AppId=WinSnap
@@ -30,7 +29,6 @@ DisableProgramGroupPage=yes
 DisableWelcomePage=no
 OutputDir=Output
 OutputBaseFilename={#OutputBaseFilename}
-SetupIconFile={#MyAppIcon}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
 SolidCompression=yes

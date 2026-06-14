@@ -21,6 +21,7 @@ build/installer/Output/
 *.tmp
 *.bak
 *.cache
+*.ico
 
 TestResults/
 coverage/

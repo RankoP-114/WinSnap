@@ -7,7 +7,6 @@ namespace WinSnap.App.Tray;
 
 /// <summary>
 /// 系统托盘常驻图标与右键菜单。左键单击 = 截图，菜单含截图/设置/退出。
-/// 图标 M0 暂用系统应用图标占位，M9/M10 替换为自定义 .ico。
 /// </summary>
 public sealed class TrayService : IDisposable
 {
@@ -61,22 +60,8 @@ public sealed class TrayService : IDisposable
         Log.Information("托盘已初始化");
     }
 
-    /// <summary>从打包进程序集的 ICO 资源加载托盘图标，失败回退系统图标。</summary>
-    private static System.Drawing.Icon LoadAppIcon()
-    {
-        try
-        {
-            var info = System.Windows.Application.GetResourceStream(
-                new Uri("pack://application:,,,/Assets/WinSnap.ico"));
-            if (info?.Stream is not null)
-                return new System.Drawing.Icon(info.Stream);
-        }
-        catch
-        {
-            // 资源缺失/损坏时回退
-        }
-        return System.Drawing.SystemIcons.Application;
-    }
+    /// <summary>使用系统默认应用图标，避免仓库依赖二进制 ico 资源。</summary>
+    private static System.Drawing.Icon LoadAppIcon() => System.Drawing.SystemIcons.Application;
 
     /// <summary>弹出气泡提示。</summary>
     public void ShowMessage(string title, string message)
