@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace WinSnap.Interop;
 
@@ -76,6 +77,8 @@ public static class WindowEnumerator
                 return true;
             if (!TryGetBounds(hwnd, out RECT rect))
                 return true;
+            if (!IsSelectableWindow(hwnd))
+                return true;
 
             int width = rect.Right - rect.Left;
             int height = rect.Bottom - rect.Top;
@@ -112,6 +115,32 @@ public static class WindowEnumerator
     private static WindowBounds ToBounds(IntPtr hwnd, in RECT rect) =>
         new(hwnd, rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
 
+    private static bool IsSelectableWindow(IntPtr hwnd)
+    {
+        if (IsWindowCloaked(hwnd))
+            return false;
+
+        string className = GetClassNameText(hwnd);
+        return className is not "Progman"
+            and not "WorkerW"
+            and not "Shell_TrayWnd"
+            and not "Shell_SecondaryTrayWnd"
+            and not "ApplicationManager_ImmersiveShellWindow";
+    }
+
+    private static bool IsWindowCloaked(IntPtr hwnd)
+    {
+        int hr = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int cloaked, Marshal.SizeOf<int>());
+        return hr == 0 && cloaked != 0;
+    }
+
+    private static string GetClassNameText(IntPtr hwnd)
+    {
+        var buffer = new StringBuilder(256);
+        int length = GetClassName(hwnd, buffer, buffer.Capacity);
+        return length > 0 ? buffer.ToString() : string.Empty;
+    }
+
     // ---------------------------------------------------------------------
     // 本地结构与常量
     // ---------------------------------------------------------------------
@@ -134,6 +163,7 @@ public static class WindowEnumerator
 
     private const uint GA_ROOT = 2;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+    private const int DWMWA_CLOAKED = 14;
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -162,6 +192,9 @@ public static class WindowEnumerator
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsIconic(IntPtr hWnd);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
@@ -169,4 +202,8 @@ public static class WindowEnumerator
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(
         IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(
+        IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 }
