@@ -1,0 +1,28 @@
+<Window x:Class="WinSnap.App.Pin.PinWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:WinSnap.App.Pin"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        Topmost="True"
+        ResizeMode="NoResize"
+        SnapsToDevicePixels="True"
+        UseLayoutRounding="True"
+        SizeToContent="Manual"
+        Opacity="0">
+    <!-- 右键菜单不再自定义深色样式：仅改 Background/Foreground 会与 .NET 10 Fluent 主题
+         模板的分层（左侧 gutter / 高亮层）冲突，呈现「一半黑一半白」。改为跟随应用 ThemeMode
+         的 Fluent 默认菜单（亮/暗/随系统），渲染完整一致。 -->
+
+    <!-- 外层边框（可显隐）；内部用 ScaleTransform 实现整图缩放，物理像素 1:1 渲染 -->
+    <Border x:Name="FrameBorder"
+            BorderBrush="#FF3C9DFF" BorderThickness="1"
+            Background="Transparent" Padding="0">
+        <Image x:Name="PinImage"
+               RenderOptions.BitmapScalingMode="HighQuality"
+               SnapsToDevicePixels="True"
+               Stretch="Fill" />
+    </Border>
+</Window>

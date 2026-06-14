@@ -1,0 +1,19 @@
+<Project>
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>0.1.13</Version>
+    <Authors>WinSnap</Authors>
+    <Product>WinSnap</Product>
+    <Company>WinSnap</Company>
+    <NeutralLanguage>zh-CN</NeutralLanguage>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(WinSnapUseAltObj)' == 'true'">
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory).alt-obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildProjectDirectory)\obj\**;$(MSBuildThisFileDirectory).alt-obj\**;$(MSBuildThisFileDirectory).restore-obj\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+</Project>

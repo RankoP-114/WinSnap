@@ -1,0 +1,160 @@
+<Window x:Class="WinSnap.App.Settings.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:WinSnap.App.Settings"
+        Title="WinSnap 设置"
+        Width="520"
+        Height="640"
+        MinWidth="460"
+        MinHeight="520"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        SnapsToDevicePixels="True"
+        FontSize="14">
+    <DockPanel LastChildFill="True">
+
+        <!-- 底部操作栏：保存 / 取消 -->
+        <Border DockPanel.Dock="Bottom"
+                BorderThickness="0,1,0,0"
+                BorderBrush="#22808080"
+                Padding="16,12">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="SaveButton"
+                        Content="保存"
+                        IsDefault="True"
+                        MinWidth="88"
+                        Height="32"
+                        Margin="0,0,10,0"
+                        Click="OnSaveClick" />
+                <Button x:Name="CancelButton"
+                        Content="取消"
+                        IsCancel="True"
+                        MinWidth="88"
+                        Height="32"
+                        Click="OnCancelClick" />
+            </StackPanel>
+        </Border>
+
+        <!-- 内容区（可滚动） -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,16">
+            <StackPanel>
+
+                <!-- ① 主题 -->
+                <TextBlock Text="主题" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <StackPanel Margin="4,0,0,20">
+                    <RadioButton x:Name="ThemeSystemRadio"
+                                 Content="跟随系统"
+                                 GroupName="Theme"
+                                 Margin="0,2"
+                                 Checked="OnThemeRadioChecked" />
+                    <RadioButton x:Name="ThemeLightRadio"
+                                 Content="浅色"
+                                 GroupName="Theme"
+                                 Margin="0,2"
+                                 Checked="OnThemeRadioChecked" />
+                    <RadioButton x:Name="ThemeDarkRadio"
+                                 Content="深色"
+                                 GroupName="Theme"
+                                 Margin="0,2"
+                                 Checked="OnThemeRadioChecked" />
+                </StackPanel>
+
+                <!-- ② 截图热键 -->
+                <TextBlock Text="截图热键" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <StackPanel Margin="4,0,0,20">
+                    <TextBlock Text="点击下方方框后按下组合键（如 Ctrl + Alt + A）"
+                               Foreground="#FF888888"
+                               Margin="0,0,0,6" />
+                    <local:HotkeyRecorderControl x:Name="CaptureHotkeyRecorder"
+                                                 HorizontalAlignment="Left" />
+                </StackPanel>
+
+                <!-- ③ 开机自启 -->
+                <TextBlock Text="开机启动" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <StackPanel Margin="4,0,0,20">
+                    <CheckBox x:Name="AutoStartCheck"
+                              Content="开机时自动启动 WinSnap" />
+                </StackPanel>
+
+                <!-- ④ 保存格式与目录 -->
+                <TextBlock Text="保存" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <StackPanel Margin="4,0,0,20">
+                    <TextBlock Text="默认保存格式" Margin="0,0,0,4" />
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                        <RadioButton x:Name="FormatPngRadio"
+                                     Content="PNG"
+                                     GroupName="SaveFormat"
+                                     Margin="0,0,16,0" />
+                        <RadioButton x:Name="FormatJpgRadio"
+                                     Content="JPG"
+                                     GroupName="SaveFormat" />
+                    </StackPanel>
+
+                    <TextBlock Text="默认保存目录" Margin="0,0,0,4" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="SaveDirTextBox"
+                                 Grid.Column="0"
+                                 Height="32"
+                                 VerticalContentAlignment="Center"
+                                 IsReadOnly="True" />
+                        <Button x:Name="BrowseButton"
+                                Grid.Column="1"
+                                Content="浏览…"
+                                Height="32"
+                                MinWidth="72"
+                                Margin="8,0,0,0"
+                                Click="OnBrowseClick" />
+                    </Grid>
+                </StackPanel>
+
+                <!-- ⑤ GIF 录制 -->
+                <TextBlock Text="GIF 录制" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <StackPanel Margin="4,0,0,20">
+                    <TextBlock Text="默认录制秒数" Margin="0,0,0,4" />
+                    <TextBox x:Name="GifDefaultDurationTextBox"
+                             Height="32"
+                             Width="120"
+                             HorizontalAlignment="Left"
+                             VerticalContentAlignment="Center"
+                             Margin="0,0,0,10" />
+
+                    <TextBlock Text="倒计时秒数" Margin="0,0,0,4" />
+                    <TextBox x:Name="GifCountdownTextBox"
+                             Height="32"
+                             Width="120"
+                             HorizontalAlignment="Left"
+                             VerticalContentAlignment="Center"
+                             Margin="0,0,0,10" />
+
+                    <TextBlock Text="每秒帧数（FPS）" Margin="0,0,0,4" />
+                    <TextBox x:Name="GifFpsTextBox"
+                             Height="32"
+                             Width="120"
+                             HorizontalAlignment="Left"
+                             VerticalContentAlignment="Center" />
+                </StackPanel>
+
+                <!-- ⑥ 放大镜 -->
+                <TextBlock Text="取色" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <StackPanel Margin="4,0,0,4">
+                    <CheckBox x:Name="MagnifierCheck"
+                               Content="截图时显示放大镜（取色器）" />
+                </StackPanel>
+
+                <!-- ⑦ 关于 -->
+                <TextBlock Text="关于" FontSize="16" FontWeight="SemiBold" Margin="0,16,0,8" />
+                <StackPanel Margin="4,0,0,4">
+                    <TextBlock Text="WinSnap" FontWeight="SemiBold" />
+                    <TextBlock x:Name="VersionTextBlock"
+                               Foreground="#FF888888"
+                               Margin="0,4,0,0" />
+                </StackPanel>
+
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

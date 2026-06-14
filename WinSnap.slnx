@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WinSnap.App/WinSnap.App.csproj" />
+    <Project Path="src/WinSnap.Core/WinSnap.Core.csproj" />
+    <Project Path="src/WinSnap.Interop/WinSnap.Interop.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WinSnap.Core.Tests/WinSnap.Core.Tests.csproj" />
+  </Folder>
+</Solution>

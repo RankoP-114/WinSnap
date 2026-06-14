@@ -1,0 +1,29 @@
+<UserControl x:Class="WinSnap.App.Capture.MagnifierControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border Background="#F0202020" BorderBrush="#FF3C9DFF" BorderThickness="1"
+            CornerRadius="6" Padding="6">
+        <StackPanel Width="132">
+            <Grid Width="120" Height="120" ClipToBounds="True">
+                <Image x:Name="ZoomImage" Width="120" Height="120" Stretch="Fill"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       SnapsToDevicePixels="True" />
+                <!-- 中心十字与目标像素框 -->
+                <Line X1="60" Y1="0" X2="60" Y2="120" Stroke="#803C9DFF" StrokeThickness="1" />
+                <Line X1="0" Y1="60" X2="120" Y2="60" Stroke="#803C9DFF" StrokeThickness="1" />
+                <Rectangle Width="9" Height="9" Stroke="#FFFFD23C" StrokeThickness="1"
+                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Grid>
+            <TextBlock x:Name="PosText" Foreground="White" FontSize="11"
+                       Margin="0,5,0,0" HorizontalAlignment="Center" />
+            <StackPanel Orientation="Horizontal" Margin="0,3,0,0" HorizontalAlignment="Center">
+                <Rectangle x:Name="ColorSample" Width="13" Height="13"
+                           Stroke="#80FFFFFF" StrokeThickness="1" />
+                <TextBlock x:Name="ColorText" Foreground="White" FontSize="11"
+                           Margin="5,0,0,0" VerticalAlignment="Center" />
+            </StackPanel>
+            <TextBlock Text="C 复制HEX · Shift+C 复制RGB" Foreground="#90FFFFFF"
+                       FontSize="9" Margin="0,3,0,0" HorizontalAlignment="Center" />
+        </StackPanel>
+    </Border>
+</UserControl>

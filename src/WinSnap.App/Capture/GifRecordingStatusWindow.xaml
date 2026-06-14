@@ -1,0 +1,27 @@
+<Window x:Class="WinSnap.App.Capture.GifRecordingStatusWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        Topmost="True"
+        ResizeMode="NoResize"
+        IsHitTestVisible="False"
+        Opacity="0">
+    <Border Background="#E61F1F1F"
+            BorderBrush="#33FFFFFF"
+            BorderThickness="1"
+            CornerRadius="8"
+            Padding="14,8">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <Ellipse Width="10" Height="10" Fill="#FFFF3B30" Margin="0,0,8,0" />
+            <TextBlock x:Name="StatusText"
+                       Text="录制中"
+                       Foreground="White"
+                       FontSize="14"
+                       FontWeight="SemiBold"
+                       VerticalAlignment="Center" />
+        </StackPanel>
+    </Border>
+</Window>
