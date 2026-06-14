@@ -120,12 +120,29 @@ public static class WindowEnumerator
         if (IsWindowCloaked(hwnd))
             return false;
 
+        nint exStyle = GetWindowExStyle(hwnd);
+        if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)) != 0)
+            return false;
+
         string className = GetClassNameText(hwnd);
+        if (className.StartsWith("ShellHandwritingCanvas", StringComparison.Ordinal))
+            return false;
+
         return className is not "Progman"
             and not "WorkerW"
             and not "Shell_TrayWnd"
             and not "Shell_SecondaryTrayWnd"
+            and not "ThumbnailDeviceHelperWnd"
+            and not "Windows.UI.Core.CoreWindow"
+            and not "EdgeUiInputTopWndClass"
             and not "ApplicationManager_ImmersiveShellWindow";
+    }
+
+    private static nint GetWindowExStyle(IntPtr hwnd)
+    {
+        return IntPtr.Size == 8
+            ? GetWindowLongPtr(hwnd, GWL_EXSTYLE)
+            : GetWindowLong(hwnd, GWL_EXSTYLE);
     }
 
     private static bool IsWindowCloaked(IntPtr hwnd)
@@ -164,6 +181,10 @@ public static class WindowEnumerator
     private const uint GA_ROOT = 2;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     private const int DWMWA_CLOAKED = 14;
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TRANSPARENT = 0x00000020;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -194,6 +215,12 @@ public static class WindowEnumerator
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern nint GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
