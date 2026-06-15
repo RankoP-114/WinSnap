@@ -247,6 +247,9 @@ public sealed class GifCaptureService
     private sealed class StreamingGifEncoder : IDisposable
     {
         private const int PaletteSize = 256;
+        private static readonly byte[] RedIndexLookup = BuildQuantizeLookup(7);
+        private static readonly byte[] GreenIndexLookup = BuildQuantizeLookup(7);
+        private static readonly byte[] BlueIndexLookup = BuildQuantizeLookup(3);
         private readonly FileStream _stream;
         private readonly int _width;
         private readonly int _height;
@@ -396,10 +399,18 @@ public sealed class GifCaptureService
             int b = bgra[offset];
             int g = bgra[offset + 1];
             int r = bgra[offset + 2];
-            int ri = r * 7 / 255;
-            int gi = g * 7 / 255;
-            int bi = b * 3 / 255;
+            int ri = RedIndexLookup[r];
+            int gi = GreenIndexLookup[g];
+            int bi = BlueIndexLookup[b];
             return (ri << 5) | (gi << 2) | bi;
+        }
+
+        private static byte[] BuildQuantizeLookup(int maxIndex)
+        {
+            var lookup = new byte[256];
+            for (int i = 0; i < lookup.Length; i++)
+                lookup[i] = (byte)(i * maxIndex / 255);
+            return lookup;
         }
 
         private void WriteUInt16(ushort value)

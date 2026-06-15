@@ -163,6 +163,14 @@ public sealed class ScrollStitcher
         return new PixelBuffer(_width, _height, copy);
     }
 
+    /// <summary>构建当前拼接结果并立即释放内部缓冲。适用于一次性长截图导出，降低最终转换阶段峰值内存。</summary>
+    public PixelBuffer BuildAndReset()
+    {
+        var result = Build();
+        Reset();
+        return result;
+    }
+
     /// <summary>重置到初始状态，可复用本实例开始新一次拼接。</summary>
     public void Reset()
     {

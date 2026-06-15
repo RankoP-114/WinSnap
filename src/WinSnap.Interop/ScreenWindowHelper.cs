@@ -7,11 +7,14 @@ namespace WinSnap.Interop;
 public static class ScreenWindowHelper
 {
     /// <summary>把窗口精确定位/铺满指定物理像素矩形（用于按显示器覆盖），置顶且不抢焦点。</summary>
-    public static void PositionTopmost(IntPtr hwnd, int x, int y, int width, int height)
+    public static void PositionTopmost(IntPtr hwnd, int x, int y, int width, int height, bool showWindow = true)
     {
+        uint flags = NativeMethods.SWP_NOACTIVATE;
+        if (showWindow)
+            flags |= NativeMethods.SWP_SHOWWINDOW;
+
         NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_TOPMOST,
-            x, y, width, height,
-            NativeMethods.SWP_SHOWWINDOW | NativeMethods.SWP_NOACTIVATE);
+            x, y, width, height, flags);
     }
 
     /// <summary>释放前台游戏/窗口可能留下的鼠标捕获与裁剪区域。</summary>

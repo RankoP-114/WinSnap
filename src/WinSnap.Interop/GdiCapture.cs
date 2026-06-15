@@ -1,6 +1,4 @@
 using System.ComponentModel;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 namespace WinSnap.Interop;
@@ -38,9 +36,10 @@ public static class GdiCapture
             if (memDc == IntPtr.Zero)
                 ThrowLastWin32("CreateCompatibleDC");
 
-            hBitmap = NativeMethods.CreateCompatibleBitmap(screenDc, width, height);
+            var bmi = BitmapInfo.CreateTopDownBgra(width, height);
+            hBitmap = CreateDIBSection(screenDc, ref bmi, DIB_RGB_COLORS, out var bits, IntPtr.Zero, 0);
             if (hBitmap == IntPtr.Zero)
-                ThrowLastWin32("CreateCompatibleBitmap");
+                ThrowLastWin32("CreateDIBSection");
 
             oldObj = NativeMethods.SelectObject(memDc, hBitmap);
             if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
@@ -52,8 +51,10 @@ public static class GdiCapture
                 ThrowLastWin32("BitBlt");
             }
 
-            using var bmp = Image.FromHbitmap(hBitmap);
-            return ToBgra(bmp);
+            int stride = checked(width * 4);
+            var buffer = new byte[checked(stride * height)];
+            Marshal.Copy(bits, buffer, 0, buffer.Length);
+            return new CapturedImage(width, height, buffer);
         }
         finally
         {
@@ -68,30 +69,63 @@ public static class GdiCapture
         }
     }
 
-    private static CapturedImage ToBgra(Bitmap bmp)
-    {
-        var rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
-        BitmapData data = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-        try
-        {
-            int stride = bmp.Width * 4;
-            var buffer = new byte[stride * bmp.Height];
-            // 源 stride 可能含行对齐填充，逐行紧凑复制
-            for (int row = 0; row < bmp.Height; row++)
-            {
-                Marshal.Copy(data.Scan0 + row * data.Stride, buffer, row * stride, stride);
-            }
-            return new CapturedImage(bmp.Width, bmp.Height, buffer);
-        }
-        finally
-        {
-            bmp.UnlockBits(data);
-        }
-    }
-
     private static void ThrowLastWin32(string api)
     {
         int error = Marshal.GetLastWin32Error();
         throw new InvalidOperationException($"{api} 失败：{new Win32Exception(error).Message} (0x{error:X8})");
     }
+
+    private const uint DIB_RGB_COLORS = 0;
+    private const uint BI_RGB = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfoHeader
+    {
+        public uint Size;
+        public int Width;
+        public int Height;
+        public ushort Planes;
+        public ushort BitCount;
+        public uint Compression;
+        public uint SizeImage;
+        public int XPelsPerMeter;
+        public int YPelsPerMeter;
+        public uint ClrUsed;
+        public uint ClrImportant;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfo
+    {
+        public BitmapInfoHeader Header;
+
+        public static BitmapInfo CreateTopDownBgra(int width, int height)
+        {
+            int stride = checked(width * 4);
+            return new BitmapInfo
+            {
+                Header = new BitmapInfoHeader
+                {
+                    Size = (uint)Marshal.SizeOf<BitmapInfoHeader>(),
+                    Width = width,
+                    Height = -height,
+                    Planes = 1,
+                    BitCount = 32,
+                    Compression = BI_RGB,
+                    SizeImage = checked((uint)((long)stride * height)),
+                    XPelsPerMeter = 2835,
+                    YPelsPerMeter = 2835,
+                },
+            };
+        }
+    }
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern IntPtr CreateDIBSection(
+        IntPtr hdc,
+        ref BitmapInfo pbmi,
+        uint usage,
+        out IntPtr ppvBits,
+        IntPtr hSection,
+        uint offset);
 }

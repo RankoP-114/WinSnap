@@ -519,7 +519,7 @@ public sealed class CaptureSession
 
     private void UpdateMagnifier(Point cursor)
     {
-        bool show = (!HasSelection || Mode == DragMode.Creating || Mode == DragMode.Resizing) && !_drawingAnnotation;
+        bool show = !HasSelection && Mode == DragMode.None && !_drawingAnnotation;
         foreach (var w in _windows)
         {
             if (show && w.Monitor is var m &&

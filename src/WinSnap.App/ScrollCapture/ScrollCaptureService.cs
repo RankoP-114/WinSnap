@@ -102,7 +102,7 @@ public sealed class ScrollCaptureService
         if (stitcher.CurrentHeight <= 0 || stitcher.Width <= 0)
             return null;
 
-        return ToBitmapSource(stitcher.Build());
+        return ToBitmapSource(stitcher.BuildAndReset());
     }
 
     private static CapturedImage CaptureRegionOnDispatcher(

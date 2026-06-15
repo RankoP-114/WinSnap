@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
 namespace WinSnap.Interop;
@@ -32,8 +33,6 @@ public static class ClipboardHelper
     {
         ArgumentNullException.ThrowIfNull(image);
 
-        byte[] dibV5 = EncodeToDibV5(image);
-
         if (!OpenClipboardWithRetry(IntPtr.Zero))
             throw new InvalidOperationException("无法打开剪贴板（可能被其它进程占用）。");
 
@@ -43,7 +42,7 @@ public static class ClipboardHelper
             // 只写 CF_DIBV5（GlobalAlloc 内存数据，跨进程可靠）；系统据此自动合成 CF_DIB 与 CF_BITMAP。
             // 关键：绝不自己写 CF_BITMAP —— 自写的 HBITMAP 是本进程 GDI 句柄，跨进程读取时失效，
             // 而 CF_BITMAP 优先级最高，会让 Clipboard.GetImage()（Claude Code 等据此读图）直接返回 NULL。
-            SetByteBufferFormat(CF_DIBV5, dibV5);
+            SetDibV5Format(image);
             if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
                 SetHDropFormat(filePath);
         }
@@ -87,57 +86,6 @@ public static class ClipboardHelper
     // 内部实现
     // ---------------------------------------------------------------------
 
-    /// <summary>
-    /// 手写 CF_DIBV5：BITMAPV5HEADER(124B) + 32bpp BGRA 像素（bottom-up、Alpha=255）。
-    /// BI_BITFIELDS + AlphaMask=0xFF000000 + sRGB —— Chromium/Electron 读剪贴板图的标准形态。
-    /// </summary>
-    private static byte[] EncodeToDibV5(CapturedImage image)
-    {
-        int w = image.Width, h = image.Height;
-        int pixelBytes = w * h * 4;
-        const int headerSize = 124;
-        var buffer = new byte[headerSize + pixelBytes];
-
-        using (var ms = new MemoryStream(buffer))
-        using (var bw = new BinaryWriter(ms))
-        {
-            bw.Write(headerSize);       // bV5Size
-            bw.Write(w);                // bV5Width
-            bw.Write(h);                // bV5Height（正 = bottom-up）
-            bw.Write((ushort)1);        // bV5Planes
-            bw.Write((ushort)32);       // bV5BitCount
-            bw.Write(3u);               // bV5Compression = BI_BITFIELDS
-            bw.Write((uint)pixelBytes); // bV5SizeImage
-            bw.Write(2835);             // bV5XPelsPerMeter
-            bw.Write(2835);             // bV5YPelsPerMeter
-            bw.Write(0u);               // bV5ClrUsed
-            bw.Write(0u);               // bV5ClrImportant
-            bw.Write(0x00FF0000u);      // bV5RedMask
-            bw.Write(0x0000FF00u);      // bV5GreenMask
-            bw.Write(0x000000FFu);      // bV5BlueMask
-            bw.Write(0xFF000000u);      // bV5AlphaMask
-            bw.Write(0x73524742u);      // bV5CSType = LCS_sRGB
-            bw.Write(new byte[36]);     // bV5Endpoints
-            bw.Write(0u);               // bV5GammaRed
-            bw.Write(0u);               // bV5GammaGreen
-            bw.Write(0u);               // bV5GammaBlue
-            bw.Write(4u);               // bV5Intent = LCS_GM_IMAGES
-            bw.Write(0u);               // bV5ProfileData
-            bw.Write(0u);               // bV5ProfileSize
-            bw.Write(0u);               // bV5Reserved
-        }
-
-        // 像素：bottom-up（逐行倒置），Alpha 统一置 255。
-        var src = image.PixelsBgra;
-        int stride = w * 4;
-        for (int y = 0; y < h; y++)
-            Buffer.BlockCopy(src, (h - 1 - y) * stride, buffer, headerSize + y * stride, stride);
-        for (int i = headerSize + 3; i < buffer.Length; i += 4)
-            buffer[i] = 0xFF;
-
-        return buffer;
-    }
-
     /// <summary>把 32bpp BGRA(top-down, Alpha 未定义) 转为不透明 Bitmap（Format32bppRgb，Alpha=255）。</summary>
     private static Bitmap ToOpaqueBitmap(CapturedImage image)
     {
@@ -165,12 +113,25 @@ public static class ClipboardHelper
         return bmp;
     }
 
-    private static void SetByteBufferFormat(uint format, byte[] bytes)
+    /// <summary>
+    /// 手写 CF_DIBV5：BITMAPV5HEADER(124B) + 32bpp BGRA 像素（bottom-up、Alpha=255）。
+    /// 直接写入 GlobalAlloc 内存，避免为大图再分配一份托管 DIB 中间缓冲。
+    /// </summary>
+    private static unsafe void SetDibV5Format(CapturedImage image)
     {
-        if (bytes is null || bytes.Length == 0)
+        int width = image.Width;
+        int height = image.Height;
+        if (width <= 0 || height <= 0 || image.PixelsBgra.Length == 0)
             return;
 
-        IntPtr hGlobal = GlobalAlloc(GHND, (UIntPtr)bytes.Length);
+        const int headerSize = 124;
+        int stride = checked(width * 4);
+        int pixelBytes = checked(stride * height);
+        int totalBytes = checked(headerSize + pixelBytes);
+        if (image.PixelsBgra.Length < pixelBytes)
+            return;
+
+        IntPtr hGlobal = GlobalAlloc(GHND, (UIntPtr)totalBytes);
         if (hGlobal == IntPtr.Zero)
             return;
 
@@ -182,14 +143,28 @@ public static class ClipboardHelper
                 return;
             try
             {
-                Marshal.Copy(bytes, 0, ptr, bytes.Length);
+                var destination = new Span<byte>((void*)ptr, totalBytes);
+                WriteDibV5Header(destination[..headerSize], width, height, pixelBytes);
+                fixed (byte* srcBase = image.PixelsBgra)
+                {
+                    byte* dstBase = (byte*)ptr + headerSize;
+                    int copyBytes = Math.Min(stride, image.Stride);
+                    for (int y = 0; y < height; y++)
+                    {
+                        byte* srcRow = srcBase + ((height - 1 - y) * image.Stride);
+                        byte* dstRow = dstBase + (y * stride);
+                        Buffer.MemoryCopy(srcRow, dstRow, stride, copyBytes);
+                        for (int a = 3; a < stride; a += 4)
+                            dstRow[a] = 0xFF;
+                    }
+                }
             }
             finally
             {
                 GlobalUnlock(hGlobal);
             }
 
-            if (SetClipboardData(format, hGlobal) != IntPtr.Zero)
+            if (SetClipboardData(CF_DIBV5, hGlobal) != IntPtr.Zero)
                 ownershipTransferred = true;
         }
         finally
@@ -198,6 +173,34 @@ public static class ClipboardHelper
                 GlobalFree(hGlobal);
         }
     }
+
+    private static void WriteDibV5Header(Span<byte> header, int width, int height, int pixelBytes)
+    {
+        WriteInt32(header, 0, 124);             // bV5Size
+        WriteInt32(header, 4, width);           // bV5Width
+        WriteInt32(header, 8, height);          // bV5Height（正 = bottom-up）
+        WriteUInt16(header, 12, 1);             // bV5Planes
+        WriteUInt16(header, 14, 32);            // bV5BitCount
+        WriteUInt32(header, 16, 3);             // bV5Compression = BI_BITFIELDS
+        WriteUInt32(header, 20, (uint)pixelBytes);
+        WriteInt32(header, 24, 2835);           // bV5XPelsPerMeter
+        WriteInt32(header, 28, 2835);           // bV5YPelsPerMeter
+        WriteUInt32(header, 40, 0x00FF0000);    // bV5RedMask
+        WriteUInt32(header, 44, 0x0000FF00);    // bV5GreenMask
+        WriteUInt32(header, 48, 0x000000FF);    // bV5BlueMask
+        WriteUInt32(header, 52, 0xFF000000);    // bV5AlphaMask
+        WriteUInt32(header, 56, 0x73524742);    // bV5CSType = LCS_sRGB
+        WriteUInt32(header, 108, 4);            // bV5Intent = LCS_GM_IMAGES
+    }
+
+    private static void WriteInt32(Span<byte> destination, int offset, int value)
+        => BinaryPrimitives.WriteInt32LittleEndian(destination[offset..], value);
+
+    private static void WriteUInt16(Span<byte> destination, int offset, ushort value)
+        => BinaryPrimitives.WriteUInt16LittleEndian(destination[offset..], value);
+
+    private static void WriteUInt32(Span<byte> destination, int offset, uint value)
+        => BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..], value);
 
     /// <summary>把单个文件路径写入 CF_HDROP（DROPFILES 头 + 宽字符路径 + 双 null 结尾）。</summary>
     private static void SetHDropFormat(string filePath)

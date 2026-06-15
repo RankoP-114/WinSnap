@@ -111,6 +111,22 @@ public class ScrollStitcherTests
     }
 
     [Fact]
+    public void BuildAndReset_ReturnsSnapshotAndClearsState()
+    {
+        var img = MakeLongImage(100);
+        var stitcher = new ScrollStitcher();
+        var frame = Slice(img, 0, 100);
+        stitcher.Append(frame);
+
+        var result = stitcher.BuildAndReset();
+
+        AssertImagesEqual(frame, result);
+        Assert.Equal(0, stitcher.CurrentHeight);
+        Assert.Equal(0, stitcher.Width);
+        Assert.Equal(0, stitcher.FrameCount);
+    }
+
+    [Fact]
     public void Stitch_KnownOffset_AppendsExactNewRows()
     {
         // 长图 200 行；两帧各 120 行，第二帧相对第一帧下移 50 行。

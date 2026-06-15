@@ -3,19 +3,22 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:WinSnap.App.Capture"
         WindowStyle="None"
-        AllowsTransparency="True"
-        Background="#01000000"
+        AllowsTransparency="False"
+        Background="Black"
         ShowInTaskbar="False"
         ShowActivated="False"
         Topmost="True"
         WindowStartupLocation="Manual"
         ResizeMode="NoResize"
         Cursor="Cross"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
         InputMethod.IsInputMethodEnabled="False">
-    <Grid x:Name="RootGrid" Background="#01000000">
+    <Grid x:Name="RootGrid" Background="Black" SnapsToDevicePixels="True">
         <!-- 该屏物理像素层（ScaleTransform 1/屏DPI，1:1 精确） -->
         <Canvas x:Name="RootCanvas" HorizontalAlignment="Left" VerticalAlignment="Top"
-                Background="#01000000">
+                Background="Black"
+                SnapsToDevicePixels="True">
             <Image x:Name="BackgroundImage" Canvas.Left="0" Canvas.Top="0"
                    RenderOptions.BitmapScalingMode="NearestNeighbor"
                    IsHitTestVisible="False" />

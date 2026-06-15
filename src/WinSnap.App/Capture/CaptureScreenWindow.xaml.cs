@@ -6,6 +6,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using WinSnap.App.Annotation;
 using WinSnap.Core.Annotations;
 using WinSnap.Interop;
@@ -19,10 +20,15 @@ namespace WinSnap.App.Capture;
 /// </summary>
 public partial class CaptureScreenWindow : Window
 {
+    private const int WmEraseBackground = 0x0014;
+    private const int WmNcCalcSize = 0x0083;
+    private static readonly IntPtr EraseBackgroundHandled = new(1);
+
     private readonly CaptureSession _session;
     private readonly BitmapSource _fullBackground;
     private readonly BitmapSource _normalBackground;
     private readonly Rectangle[] _handles = new Rectangle[8];
+    private readonly RectangleGeometry _selectionClip = new();
     private readonly AnnotationCanvas _annotations = new();
     private double _scale;
     private long _lastAnnotationRevision = -1;
@@ -33,6 +39,9 @@ public partial class CaptureScreenWindow : Window
     private Point _toolbarDragStart;
     private double _toolbarStartLeft;
     private double _toolbarStartTop;
+    private bool _pointerMoveQueued;
+    private Point _queuedPointer;
+    private HwndSource? _hwndSource;
 
     public MonitorInfo Monitor { get; }
 
@@ -69,6 +78,7 @@ public partial class CaptureScreenWindow : Window
         DimOverlay.Height = Monitor.Height;
         SelectionImage.Width = Monitor.Width;
         SelectionImage.Height = Monitor.Height;
+        SelectionImage.Clip = _selectionClip;
         RootCanvas.LayoutTransform = new ScaleTransform(1.0 / _scale, 1.0 / _scale);
 
         // 标注层：共享会话文档，按 -屏原点 偏移把绝对坐标映射到本屏本地坐标
@@ -144,6 +154,9 @@ public partial class CaptureScreenWindow : Window
     {
         base.OnSourceInitialized(e);
         var hwnd = new WindowInteropHelper(this).Handle;
+        _hwndSource = HwndSource.FromHwnd(hwnd);
+        _hwndSource?.AddHook(WindowMessageHook);
+
         var offscreen = GetOffscreenPosition();
         ScreenWindowHelper.PositionTopmost(hwnd, offscreen.X, offscreen.Y, Monitor.Width, Monitor.Height);
 
@@ -166,7 +179,7 @@ public partial class CaptureScreenWindow : Window
     {
         var hwnd = new WindowInteropHelper(this).Handle;
         if (hwnd != IntPtr.Zero)
-            ScreenWindowHelper.PositionTopmost(hwnd, Monitor.X, Monitor.Y, Monitor.Width, Monitor.Height);
+            ScreenWindowHelper.PositionTopmost(hwnd, Monitor.X, Monitor.Y, Monitor.Width, Monitor.Height, showWindow: false);
     }
 
     public void ActivateForInput()
@@ -185,6 +198,9 @@ public partial class CaptureScreenWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _pointerMoveQueued = false;
+        _hwndSource?.RemoveHook(WindowMessageHook);
+        _hwndSource = null;
         BackgroundImage.Source = null;
         SelectionImage.Source = null;
         SelectionImage.Clip = null;
@@ -195,6 +211,21 @@ public partial class CaptureScreenWindow : Window
         TextInputBox.Text = string.Empty;
         RootCanvas.LayoutTransform = null;
         base.OnClosed(e);
+    }
+
+    private static IntPtr WindowMessageHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        switch (msg)
+        {
+            case WmEraseBackground:
+                handled = true;
+                return EraseBackgroundHandled;
+            case WmNcCalcSize:
+                handled = true;
+                return IntPtr.Zero;
+            default:
+                return IntPtr.Zero;
+        }
     }
 
     private static Point CursorPoint()
@@ -212,7 +243,25 @@ public partial class CaptureScreenWindow : Window
         e.Handled = true;
     }
 
-    protected override void OnMouseMove(MouseEventArgs e) => _session.PointerMove(CursorPoint());
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        _queuedPointer = CursorPoint();
+
+        if (_pointerMoveQueued)
+            return;
+
+        _pointerMoveQueued = true;
+        Dispatcher.BeginInvoke(new Action(ProcessQueuedPointerMove), DispatcherPriority.Render);
+    }
+
+    private void ProcessQueuedPointerMove()
+    {
+        if (!_pointerMoveQueued)
+            return;
+
+        _pointerMoveQueued = false;
+        _session.PointerMove(_queuedPointer);
+    }
 
     protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
     {
@@ -316,12 +365,13 @@ public partial class CaptureScreenWindow : Window
 
         if (right > left && bottom > top)
         {
-            SelectionImage.Clip = new RectangleGeometry(new Rect(left, top, right - left, bottom - top));
+            _selectionClip.Rect = new Rect(left, top, right - left, bottom - top);
+            if (!ReferenceEquals(SelectionImage.Clip, _selectionClip))
+                SelectionImage.Clip = _selectionClip;
             SelectionImage.Visibility = Visibility.Visible;
         }
         else
         {
-            SelectionImage.Clip = null;
             SelectionImage.Visibility = Visibility.Collapsed;
         }
     }
@@ -334,7 +384,6 @@ public partial class CaptureScreenWindow : Window
             _backgroundDimmed = false;
         }
 
-        SelectionImage.Clip = null;
         SelectionImage.Visibility = Visibility.Collapsed;
     }
 

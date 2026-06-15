@@ -865,6 +865,10 @@ public static class DuplicationCapture
         private readonly int _destX;
         private readonly int _destY;
         private IDXGIOutputDuplication? _duplication;
+        private ID3D11Texture2D? _regionStaging;
+        private uint _regionStagingWidth;
+        private uint _regionStagingHeight;
+        private Format _regionStagingFormat;
         private bool _disposed;
 
         public uint OutputIndex { get; }
@@ -997,7 +1001,8 @@ public static class DuplicationCapture
                             out int patchW,
                             out int patchH,
                             diag,
-                            OutputIndex))
+                            OutputIndex,
+                            GetOrCreateRegionStaging))
                     {
                         return;
                     }
@@ -1030,12 +1035,48 @@ public static class DuplicationCapture
             if (_disposed)
                 return;
 
+            _regionStaging?.Dispose();
+            _regionStaging = null;
             _duplication?.Dispose();
             _output6.Dispose();
             _output.Dispose();
             _context.Dispose();
             _device.Dispose();
             _disposed = true;
+        }
+
+        private ID3D11Texture2D GetOrCreateRegionStaging(Texture2DDescription sourceDescription, int width, int height)
+        {
+            uint targetWidth = (uint)width;
+            uint targetHeight = (uint)height;
+            if (_regionStaging is not null &&
+                _regionStagingWidth == targetWidth &&
+                _regionStagingHeight == targetHeight &&
+                _regionStagingFormat == sourceDescription.Format)
+            {
+                return _regionStaging;
+            }
+
+            _regionStaging?.Dispose();
+            var stagingDesc = new Texture2DDescription
+            {
+                Width = targetWidth,
+                Height = targetHeight,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = sourceDescription.Format,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read,
+                MiscFlags = ResourceOptionFlags.None,
+            };
+
+            _regionStaging = _device.CreateTexture2D(in stagingDesc);
+            _regionStagingWidth = targetWidth;
+            _regionStagingHeight = targetHeight;
+            _regionStagingFormat = sourceDescription.Format;
+            return _regionStaging;
         }
     }
 
@@ -1182,7 +1223,8 @@ public static class DuplicationCapture
         out int texW,
         out int texH,
         List<string> diag,
-        uint outputIndex)
+        uint outputIndex,
+        Func<Texture2DDescription, int, int, ID3D11Texture2D>? stagingFactory = null)
     {
         bgra = Array.Empty<byte>();
         texW = 0;
@@ -1206,20 +1248,27 @@ public static class DuplicationCapture
             if (texW <= 0 || texH <= 0)
                 return false;
 
-            var stagingDesc = new Texture2DDescription
+            if (stagingFactory is null)
             {
-                Width = (uint)texW,
-                Height = (uint)texH,
-                MipLevels = 1,
-                ArraySize = 1,
-                Format = srcDesc.Format,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Staging,
-                BindFlags = BindFlags.None,
-                CPUAccessFlags = CpuAccessFlags.Read,
-                MiscFlags = ResourceOptionFlags.None,
-            };
-            staging = device.CreateTexture2D(in stagingDesc);
+                var stagingDesc = new Texture2DDescription
+                {
+                    Width = (uint)texW,
+                    Height = (uint)texH,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    Format = srcDesc.Format,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Staging,
+                    BindFlags = BindFlags.None,
+                    CPUAccessFlags = CpuAccessFlags.Read,
+                    MiscFlags = ResourceOptionFlags.None,
+                };
+                staging = device.CreateTexture2D(in stagingDesc);
+            }
+            else
+            {
+                staging = stagingFactory(srcDesc, texW, texH);
+            }
 
             var sourceBox = new Box(sourceX, sourceY, 0, sourceX + texW, sourceY + texH, 1);
             context.CopySubresourceRegion(staging, 0, 0, 0, 0, frameTex, 0, sourceBox);
@@ -1263,7 +1312,8 @@ public static class DuplicationCapture
         }
         finally
         {
-            staging?.Dispose();
+            if (stagingFactory is null)
+                staging?.Dispose();
             frameTex.Dispose();
         }
     }

@@ -74,20 +74,31 @@ public static class ScreenBitmapSourceCapture
         if (source.PixelWidth <= 0 || source.PixelHeight <= 0 || source.Format.BitsPerPixel < 24)
             return false;
 
-        int pixelCount = source.PixelWidth * source.PixelHeight;
-        int step = Math.Max(1, pixelCount / Math.Max(1, maxSamples));
-        int bytesPerPixel = Math.Max(4, (source.Format.BitsPerPixel + 7) / 8);
-        var pixel = new byte[bytesPerPixel];
+        int width = source.PixelWidth;
+        int height = source.PixelHeight;
+        long pixelCount = (long)width * height;
+        long step = Math.Max(1, pixelCount / Math.Max(1, maxSamples));
+        int bitsPerPixel = source.Format.BitsPerPixel;
+        int bytesPerPixel = Math.Max(3, (bitsPerPixel + 7) / 8);
+        int stride = checked(((width * bitsPerPixel) + 7) / 8);
+        var row = new byte[stride];
+        int copiedY = -1;
         int hits = 0;
 
-        for (int p = 0; p < pixelCount; p += step)
+        for (long p = 0; p < pixelCount; p += step)
         {
-            int x = p % source.PixelWidth;
-            int y = p / source.PixelWidth;
-            source.CopyPixels(new Int32Rect(x, y, 1, 1), pixel, bytesPerPixel, 0);
-            byte b = pixel[0];
-            byte g = pixel[1];
-            byte r = pixel[2];
+            int x = (int)(p % width);
+            int y = (int)(p / width);
+            if (y != copiedY)
+            {
+                source.CopyPixels(new Int32Rect(0, y, width, 1), row, stride, 0);
+                copiedY = y;
+            }
+
+            int offset = x * bytesPerPixel;
+            byte b = row[offset];
+            byte g = row[offset + 1];
+            byte r = row[offset + 2];
             if (Math.Max(r, Math.Max(g, b)) > threshold && ++hits >= requiredHits)
                 return true;
         }

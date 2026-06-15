@@ -20,7 +20,6 @@ public sealed class ToneMapper
 {
     private const double ScrgbWhiteNits = 80.0; // scRGB: 线性 1.0 == 80 nits
     private const double KneeStart = 0.95;
-    private const double ShoulderPower = 0.5;
 
     /// <summary>默认 SDR 参考白亮度（nits）。</summary>
     public const double DefaultSdrWhiteNits = 300.0;
@@ -196,7 +195,7 @@ public sealed class ToneMapper
         else
         {
             double t = (x - ks) / (xPeak - ks);
-            y = ks + ((1.0 - ks) * Math.Pow(t, ShoulderPower));
+            y = ks + ((1.0 - ks) * Math.Sqrt(t));
         }
 
         // black boost（BT.2390 形式）：minLum*(1-y)^4
