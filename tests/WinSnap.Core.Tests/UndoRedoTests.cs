@@ -154,6 +154,24 @@ public class UndoRedoTests
     }
 
     [Fact]
+    public void RemoveElementCommand_UndoRestoresOriginalInsertionIndex()
+    {
+        var doc = new AnnotationDocument();
+        var first = new RectangleAnnotation { Rect = new RectInt(0, 0, 10, 10) };
+        var removed = new EllipseAnnotation { Rect = new RectInt(10, 0, 10, 10) };
+        var last = new ArrowAnnotation { Start = new PointInt(0, 0), End = new PointInt(10, 10) };
+        doc.Add(first);
+        doc.Add(removed);
+        doc.Add(last);
+
+        var stack = new UndoRedoStack();
+        stack.Execute(new RemoveElementCommand(doc, removed));
+        stack.Undo();
+
+        Assert.Equal(new AnnotationElement[] { first, removed, last }, doc.Elements);
+    }
+
+    [Fact]
     public void TransformElementCommand_Capture_UndoRedo_RestoresGeometry()
     {
         var doc = new AnnotationDocument();

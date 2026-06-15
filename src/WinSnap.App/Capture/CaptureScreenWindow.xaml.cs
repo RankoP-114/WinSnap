@@ -22,7 +22,6 @@ public partial class CaptureScreenWindow : Window
     private readonly CaptureSession _session;
     private readonly BitmapSource _fullBackground;
     private readonly BitmapSource _normalBackground;
-    private readonly BitmapSource _dimmedBackground;
     private readonly Rectangle[] _handles = new Rectangle[8];
     private readonly AnnotationCanvas _annotations = new();
     private double _scale;
@@ -60,13 +59,14 @@ public partial class CaptureScreenWindow : Window
             new Int32Rect(monitor.X - vs.X, monitor.Y - vs.Y, monitor.Width, monitor.Height));
         background.Freeze();
         _normalBackground = background;
-        _dimmedBackground = CreateDimmedBitmap(background);
         BackgroundImage.Source = _normalBackground;
         SelectionImage.Source = _normalBackground;
         RootCanvas.Width = Monitor.Width;
         RootCanvas.Height = Monitor.Height;
         BackgroundImage.Width = Monitor.Width;
         BackgroundImage.Height = Monitor.Height;
+        DimOverlay.Width = Monitor.Width;
+        DimOverlay.Height = Monitor.Height;
         SelectionImage.Width = Monitor.Width;
         SelectionImage.Height = Monitor.Height;
         RootCanvas.LayoutTransform = new ScaleTransform(1.0 / _scale, 1.0 / _scale);
@@ -111,6 +111,12 @@ public partial class CaptureScreenWindow : Window
 
     private void ConfigureToolbarForMode()
     {
+        if (_session.IsPinCapture)
+        {
+            ConfirmButton.ToolTip = "钉到屏幕（双击 / ⏎）";
+            return;
+        }
+
         if (!_session.IsSelectionOnlyMode)
             return;
 
@@ -324,7 +330,7 @@ public partial class CaptureScreenWindow : Window
     {
         if (_backgroundDimmed)
         {
-            BackgroundImage.Source = _normalBackground;
+            DimOverlay.Visibility = Visibility.Collapsed;
             _backgroundDimmed = false;
         }
 
@@ -337,43 +343,8 @@ public partial class CaptureScreenWindow : Window
         if (_backgroundDimmed)
             return;
 
-        BackgroundImage.Source = _dimmedBackground;
+        DimOverlay.Visibility = Visibility.Visible;
         _backgroundDimmed = true;
-    }
-
-    private static BitmapSource CreateDimmedBitmap(BitmapSource source)
-    {
-        const int bytesPerPixel = 4;
-        const double dimFactor = 0.38;
-
-        BitmapSource src = source.Format == PixelFormats.Bgr32
-            ? source
-            : new FormatConvertedBitmap(source, PixelFormats.Bgr32, null, 0);
-
-        int width = src.PixelWidth;
-        int height = src.PixelHeight;
-        int stride = width * bytesPerPixel;
-        var pixels = new byte[stride * height];
-        src.CopyPixels(pixels, stride, 0);
-
-        for (int i = 0; i < pixels.Length; i += bytesPerPixel)
-        {
-            pixels[i] = (byte)Math.Round(pixels[i] * dimFactor);
-            pixels[i + 1] = (byte)Math.Round(pixels[i + 1] * dimFactor);
-            pixels[i + 2] = (byte)Math.Round(pixels[i + 2] * dimFactor);
-        }
-
-        var dimmed = BitmapSource.Create(
-            width,
-            height,
-            source.DpiX,
-            source.DpiY,
-            PixelFormats.Bgr32,
-            null,
-            pixels,
-            stride);
-        dimmed.Freeze();
-        return dimmed;
     }
 
     private void CreateHandles()

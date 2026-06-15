@@ -19,6 +19,8 @@
             <Image x:Name="BackgroundImage" Canvas.Left="0" Canvas.Top="0"
                    RenderOptions.BitmapScalingMode="NearestNeighbor"
                    IsHitTestVisible="False" />
+            <Rectangle x:Name="DimOverlay" Canvas.Left="0" Canvas.Top="0"
+                       Fill="#9E000000" IsHitTestVisible="False" Visibility="Collapsed" />
             <Image x:Name="SelectionImage" Canvas.Left="0" Canvas.Top="0"
                    RenderOptions.BitmapScalingMode="NearestNeighbor"
                    IsHitTestVisible="False" Visibility="Collapsed" />

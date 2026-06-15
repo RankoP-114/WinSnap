@@ -141,6 +141,40 @@ public class ScrollStitcherTests
     }
 
     [Fact]
+    public void Stitch_NoOverlapFrame_DoesNotAppendAndFlagsMatchFailure()
+    {
+        var first = Slice(MakeLongImage(180, seed: 111), 0, 120);
+        var unrelated = Slice(MakeLongImage(180, seed: 999), 0, 120);
+        var stitcher = new ScrollStitcher(templateHeight: 60);
+
+        stitcher.Append(first);
+        stitcher.Append(unrelated);
+
+        Assert.True(stitcher.LastMatchFailed);
+        Assert.True(stitcher.LastMatchAverageSadPerChannel > stitcher.MaxAverageSadPerChannel);
+        Assert.False(stitcher.IsAtBottom);
+        Assert.Equal(0, stitcher.LastAppendedHeight);
+        Assert.Equal(120, stitcher.CurrentHeight);
+        AssertImagesEqual(first, stitcher.Build());
+    }
+
+    [Fact]
+    public void Stitch_RepeatedSolidFrame_DetectsBottomInsteadOfAppendingArbitraryRows()
+    {
+        var frame = MakeSolidFrame(100, new ColorRgba(32, 64, 96, 255));
+        var stitcher = new ScrollStitcher(templateHeight: 80);
+
+        stitcher.Append(frame);
+        stitcher.Append(frame);
+
+        Assert.False(stitcher.LastMatchFailed);
+        Assert.True(stitcher.IsAtBottom);
+        Assert.Equal(0, stitcher.LastAppendedHeight);
+        Assert.Equal(100, stitcher.CurrentHeight);
+        AssertImagesEqual(frame, stitcher.Build());
+    }
+
+    [Fact]
     public void Stitch_WithFixedHeader_ComputesCorrectOffset()
     {
         // 模拟"顶部固定 header + 可滚动正文"：
@@ -183,6 +217,15 @@ public class ScrollStitcherTests
         for (int y = 0; y < h; y++)
             for (int x = 0; x < Width; x++)
                 buf.SetPixel(x, y, new ColorRgba((byte)(200 - y), (byte)(x * 3), (byte)(y * 5 + x), 255));
+        return buf;
+    }
+
+    private static PixelBuffer MakeSolidFrame(int h, ColorRgba color)
+    {
+        var buf = new PixelBuffer(Width, h);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < Width; x++)
+                buf.SetPixel(x, y, color);
         return buf;
     }
 

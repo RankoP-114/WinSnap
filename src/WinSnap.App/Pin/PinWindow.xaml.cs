@@ -6,6 +6,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Serilog;
+using WinSnap.App.Diagnostics;
 using WinSnap.App.Imaging;
 using WinSnap.Interop;
 
@@ -276,8 +277,7 @@ public partial class PinWindow : Window
         try
         {
             var captured = _captured ??= ToCapturedImage(_image);
-            string? tempPng = Path.Combine(Path.GetTempPath(),
-                $"WinSnap_pin_{DateTime.Now:yyyyMMdd_HHmmssfff}.png");
+            string? tempPng = TempFileCleaner.BuildTempPath("png");
             try
             {
                 File.WriteAllBytes(tempPng, ClipboardHelper.EncodePng(captured));
@@ -300,7 +300,7 @@ public partial class PinWindow : Window
         {
             Title = "保存钉图",
             Filter = "PNG 图片 (*.png)|*.png|JPEG 图片 (*.jpg)|*.jpg",
-            FileName = $"WinSnap_{DateTime.Now:yyyyMMdd_HHmmss}.png",
+            FileName = ImageSaver.BuildDefaultFileName("png"),
             DefaultExt = ".png",
             AddExtension = true,
         };

@@ -34,30 +34,30 @@ internal static class NativeMethods
     public static extern bool ReleaseCapture();
 
     // ---- GDI 抓屏 ----
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr GetDC(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     public static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int cx, int cy);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     public static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool DeleteObject(IntPtr ho);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool DeleteDC(IntPtr hdc);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool BitBlt(IntPtr hdc, int x, int y, int cx, int cy,
         IntPtr hdcSrc, int x1, int y1, uint rop);

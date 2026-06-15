@@ -52,6 +52,40 @@ public class ToneMapperTests
     }
 
     [Fact]
+    public void MidHighlight_RollsOffBelowFullWhite()
+    {
+        var mapper = new ToneMapper();
+
+        var white = mapper.MapToSdrBgra(GrayAtNits(300), 1, 1, 300, 1000);
+        var highlight = mapper.MapToSdrBgra(GrayAtNits(500), 1, 1, 300, 1000);
+        var brighterHighlight = mapper.MapToSdrBgra(GrayAtNits(800), 1, 1, 300, 1000);
+
+        Assert.True(highlight[2] > white[2], $"highlight R={highlight[2]} 应 > white R={white[2]}");
+        Assert.True(highlight[2] >= white[2] + 2, $"500nit 高光应与 SDR 白拉开至少 2 个码值，highlight R={highlight[2]} white R={white[2]}");
+        Assert.True(highlight[2] < 255, $"500nit 高光不应硬剪裁到 255，R={highlight[2]}");
+        Assert.True(brighterHighlight[2] > highlight[2], $"800nit 高光应继续高于 500nit，800nit R={brighterHighlight[2]} 500nit R={highlight[2]}");
+        Assert.True(brighterHighlight[2] < 255, $"800nit 高光仍应低于峰值满白，R={brighterHighlight[2]}");
+    }
+
+    [Fact]
+    public void NonFiniteInput_DoesNotMapBrightHighlightToBlack()
+    {
+        var mapper = new ToneMapper();
+
+        var positiveInfinity = mapper.MapToSdrBgra(
+            OnePixel(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity),
+            1,
+            1,
+            300,
+            1000);
+        var nan = mapper.MapToSdrBgra(OnePixel(float.NaN, float.NaN, float.NaN), 1, 1, 300, 1000);
+
+        Assert.True(positiveInfinity[2] >= 250, $"R={positiveInfinity[2]}");
+        Assert.Equal(0, nan[2]);
+        Assert.Equal(255, nan[3]);
+    }
+
+    [Fact]
     public void Output_AlwaysInByteRange()
     {
         var mapper = new ToneMapper();

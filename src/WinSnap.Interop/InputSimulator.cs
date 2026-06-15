@@ -10,7 +10,7 @@ namespace WinSnap.Interop;
 /// 1) 以管理员（更高完整性级别）运行的窗口——非提权进程无法向其注入输入（UIPI）；
 /// 2) 自绘 / 自行处理原始输入而忽略 WM_MOUSEWHEEL 的应用，或仅响应触控板精密滚动手势的控件；
 /// 3) 焦点/命中策略特殊的全屏游戏或 DirectComposition 表面。
-/// 这些场景应回退到「半自动」逐帧模式（由用户手动滚动后再追加帧）。
+/// 这些场景下自动长截图可能提前停止并返回当前已拼接内容。
 /// 所有 P/Invoke 声明均为本类私有，不与现有 <c>NativeMethods</c> 冲突。
 /// </summary>
 public static class InputSimulator

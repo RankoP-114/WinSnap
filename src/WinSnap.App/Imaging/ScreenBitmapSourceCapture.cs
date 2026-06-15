@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
@@ -25,7 +26,7 @@ public static class ScreenBitmapSourceCapture
 
         IntPtr screenDc = GetDC(IntPtr.Zero);
         if (screenDc == IntPtr.Zero)
-            throw new InvalidOperationException("GetDC 失败。");
+            ThrowLastWin32("GetDC");
 
         IntPtr memDc = IntPtr.Zero;
         IntPtr hBitmap = IntPtr.Zero;
@@ -34,15 +35,17 @@ public static class ScreenBitmapSourceCapture
         {
             memDc = CreateCompatibleDC(screenDc);
             if (memDc == IntPtr.Zero)
-                throw new InvalidOperationException("CreateCompatibleDC 失败。");
+                ThrowLastWin32("CreateCompatibleDC");
 
             hBitmap = CreateCompatibleBitmap(screenDc, width, height);
             if (hBitmap == IntPtr.Zero)
-                throw new InvalidOperationException("CreateCompatibleBitmap 失败。");
+                ThrowLastWin32("CreateCompatibleBitmap");
 
             oldObj = SelectObject(memDc, hBitmap);
+            if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
+                ThrowLastWin32("SelectObject");
             if (!BitBlt(memDc, 0, 0, width, height, screenDc, x, y, SRCCOPY | CAPTUREBLT))
-                throw new InvalidOperationException("BitBlt 失败。");
+                ThrowLastWin32("BitBlt");
 
             var source = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
                 hBitmap,
@@ -60,7 +63,8 @@ public static class ScreenBitmapSourceCapture
                 DeleteObject(hBitmap);
             if (memDc != IntPtr.Zero)
                 DeleteDC(memDc);
-            ReleaseDC(IntPtr.Zero, screenDc);
+            if (screenDc != IntPtr.Zero)
+                ReleaseDC(IntPtr.Zero, screenDc);
         }
     }
 
@@ -94,30 +98,36 @@ public static class ScreenBitmapSourceCapture
     private const uint SRCCOPY = 0x00CC0020;
     private const uint CAPTUREBLT = 0x40000000;
 
-    [DllImport("user32.dll")]
+    private static void ThrowLastWin32(string api)
+    {
+        int error = Marshal.GetLastWin32Error();
+        throw new InvalidOperationException($"{api} 失败：{new Win32Exception(error).Message} (0x{error:X8})");
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr GetDC(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int cx, int cy);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DeleteObject(IntPtr ho);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DeleteDC(IntPtr hdc);
 
-    [DllImport("gdi32.dll")]
+    [DllImport("gdi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool BitBlt(IntPtr hdc, int x, int y, int cx, int cy,
         IntPtr hdcSrc, int x1, int y1, uint rop);

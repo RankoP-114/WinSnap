@@ -33,8 +33,7 @@ namespace WinSnap.Interop;
 /// </summary>
 public static class DuplicationCapture
 {
-    private const int SrgbLutSize = 8192;
-    private static readonly byte[] SrgbByteLut = BuildSrgbByteLut();
+    private const uint DxgiErrorAccessLost = 0x887A0026;
 
     /// <summary>每块屏 AcquireNextFrame 的单次超时（毫秒）。</summary>
     private const int AcquireTimeoutMs = 120;
@@ -245,6 +244,7 @@ public static class DuplicationCapture
             bool sawPlaceholderFrame = false;
             bool sawBlackFrame = false;
             int timeouts = 0;
+            int accessLostRecreates = 0;
             int acquireBudgetMs = isHdr
                 ? AcquireTotalBudgetMs
                 : Math.Clamp(sdrAcquireTotalBudgetMs, AcquireTimeoutMs, AcquireTotalBudgetMs);
@@ -254,7 +254,7 @@ public static class DuplicationCapture
             {
                 IDXGIResource? frameResource = null;
                 Result ar = duplication.AcquireNextFrame(AcquireTimeoutMs, out OutduplFrameInfo frameInfo, out frameResource);
-                if (ar == Vortice.DXGI.ResultCode.WaitTimeout || frameResource is null)
+                if (ar == Vortice.DXGI.ResultCode.WaitTimeout)
                 {
                     frameResource?.Dispose();
                     timeouts++;
@@ -262,15 +262,45 @@ public static class DuplicationCapture
                 }
                 if (ar.Failure)
                 {
-                    frameResource.Dispose();
+                    frameResource?.Dispose();
+                    if (IsDxgiError(ar, DxgiErrorAccessLost))
+                    {
+                        if (accessLostRecreates == 0)
+                        {
+                            accessLostRecreates++;
+                            diag.Add($"output#{outputIndex} Desktop Duplication access lost（0x{ar.Code:X8}），重建 duplication 后重试。");
+                            duplication.Dispose();
+                            duplication = TryCreateDuplication(device, output, output6, diag, outputIndex);
+                            if (duplication is null)
+                                return;
+                            continue;
+                        }
+
+                        diag.Add($"output#{outputIndex} Desktop Duplication access lost 重建后仍失败（0x{ar.Code:X8}），保留当前基底。");
+                        return;
+                    }
+
                     diag.Add($"output#{outputIndex} AcquireNextFrame 失败（0x{ar.Code:X8}），保留当前基底。");
                     return;
+                }
+                if (frameResource is null)
+                {
+                    timeouts++;
+                    continue;
                 }
 
                 try
                 {
                     if (frameInfo.ProtectedContentMaskedOut)
                         diag.Add($"output#{outputIndex} 含受保护内容（已被屏蔽为黑）。");
+
+                    if (frameInfo.LastPresentTime == 0)
+                    {
+                        if (!sawPlaceholderFrame)
+                            diag.Add($"output#{outputIndex} 丢弃 LastPresentTime=0 的占位帧。");
+                        sawPlaceholderFrame = true;
+                        continue;
+                    }
 
                     if (!TryProcessFrame(device, context, frameResource, isHdr,
                             hdrSdrWhiteNits, hdrPeakNits,
@@ -281,24 +311,12 @@ public static class DuplicationCapture
 
                     if (!CapturedImage.HasVisibleContent(texW, texH, bgra))
                     {
-                        if (frameInfo.LastPresentTime == 0)
-                        {
-                            if (!sawPlaceholderFrame)
-                                diag.Add($"output#{outputIndex} 丢弃 LastPresentTime=0 的全黑占位帧。");
-                            sawPlaceholderFrame = true;
-                        }
-                        else if (!sawBlackFrame)
+                        if (!sawBlackFrame)
                         {
                             diag.Add($"output#{outputIndex} 丢弃全黑帧（可能是 Desktop Duplication 空帧或受保护/远程显示内容）。");
                             sawBlackFrame = true;
                         }
                         continue;
-                    }
-
-                    if (frameInfo.LastPresentTime == 0 && !sawPlaceholderFrame)
-                    {
-                        diag.Add($"output#{outputIndex} 接受 LastPresentTime=0 但内容可见的首帧。");
-                        sawPlaceholderFrame = true;
                     }
 
                     // 拼贴到虚拟桌面画布（按 DesktopCoordinates 相对原点偏移，做边界裁剪）。
@@ -320,6 +338,9 @@ public static class DuplicationCapture
             output6.Dispose();
         }
     }
+
+    private static bool IsDxgiError(Result result, uint code)
+        => unchecked((uint)result.Code) == code;
 
     private static IDXGIOutputDuplication? TryCreateDuplication(
         ID3D11Device device,
@@ -410,9 +431,8 @@ public static class DuplicationCapture
             {
                 if (srcDesc.Format == Format.R16G16B16A16_Float)
                 {
-                    // HDR 路径：FP16 scRGB（线性，(1,1,1)=80nits）→ tone map → SDR BGRA8。
+                    // HDR 路径：FP16 scRGB（线性，(1,1,1)=80nits）→ ToneMapper → SDR BGRA8。
                     // 原色为 Rec.709，传 inputIsRec2020:false 跳过 Rec.2020→709 矩阵。
-                    // 直接从映射的 FP16 行缓冲写出 BGRA，避免先展开成 width*height*4 的 float[]。
                     bgra = MapScRgbFp16ToSdrBgra(
                         map.DataPointer, (int)map.RowPitch, texW, texH,
                         hdrSdrWhiteNits, hdrPeakNits,
@@ -458,12 +478,14 @@ public static class DuplicationCapture
     {
         if (sdrWhiteNits <= 0) throw new ArgumentOutOfRangeException(nameof(sdrWhiteNits));
         if (hdrPeakNits <= 0) throw new ArgumentOutOfRangeException(nameof(hdrPeakNits));
-        if (hdrPeakNits < sdrWhiteNits) hdrPeakNits = sdrWhiteNits;
+        if (w < 0) throw new ArgumentOutOfRangeException(nameof(w));
+        if (h < 0) throw new ArgumentOutOfRangeException(nameof(h));
 
-        var dst = new byte[(long)w * h * 4];
-        double xPeak = hdrPeakNits / sdrWhiteNits;
-        const double ks = 1.0;
-        double scaleScrgbToRel = 80.0 / sdrWhiteNits;
+        long componentCount = (long)w * h * 4;
+        if (componentCount > int.MaxValue)
+            throw new InvalidOperationException($"HDR 帧过大，无法展开为 scRGB 缓冲：{w}x{h}。");
+
+        var scRgba = new float[(int)componentCount];
         byte* basePtr = (byte*)dataPtr;
         for (int y = 0; y < h; y++)
         {
@@ -472,100 +494,21 @@ public static class DuplicationCapture
             for (int x = 0; x < w; x++)
             {
                 int sp = x * 4;
-                double r = (float)BitConverter.UInt16BitsToHalf(row[sp + 0]);
-                double g = (float)BitConverter.UInt16BitsToHalf(row[sp + 1]);
-                double b = (float)BitConverter.UInt16BitsToHalf(row[sp + 2]);
-                float aF = (float)BitConverter.UInt16BitsToHalf(row[sp + 3]);
-
-                if (r < 0) r = 0;
-                if (g < 0) g = 0;
-                if (b < 0) b = 0;
-
-                double rRel = r * scaleScrgbToRel;
-                double gRel = g * scaleScrgbToRel;
-                double bRel = b * scaleScrgbToRel;
-
-                double maxRel = Math.Max(rRel, Math.Max(gRel, bRel));
-                if (maxRel > 1e-9)
-                {
-                    double mapped = Eetf(maxRel, ks, xPeak);
-                    double gain = mapped / maxRel;
-                    rRel *= gain;
-                    gRel *= gain;
-                    bRel *= gain;
-                }
-
-                double r709, g709, b709;
-                if (inputIsRec2020)
-                {
-                    r709 = (1.6604910 * rRel) - (0.5876411 * gRel) - (0.0728499 * bRel);
-                    g709 = (-0.1245505 * rRel) + (1.1328999 * gRel) - (0.0083494 * bRel);
-                    b709 = (-0.0181508 * rRel) - (0.1005789 * gRel) + (1.1187297 * bRel);
-                }
-                else
-                {
-                    r709 = rRel;
-                    g709 = gRel;
-                    b709 = bRel;
-                }
-
                 int dp = dstRow + sp;
-                dst[dp + 0] = ToSrgbByte(b709);
-                dst[dp + 1] = ToSrgbByte(g709);
-                dst[dp + 2] = ToSrgbByte(r709);
-                dst[dp + 3] = ToByte(Math.Clamp(aF, 0f, 1f));
+                scRgba[dp + 0] = (float)BitConverter.UInt16BitsToHalf(row[sp + 0]);
+                scRgba[dp + 1] = (float)BitConverter.UInt16BitsToHalf(row[sp + 1]);
+                scRgba[dp + 2] = (float)BitConverter.UInt16BitsToHalf(row[sp + 2]);
+                scRgba[dp + 3] = (float)BitConverter.UInt16BitsToHalf(row[sp + 3]);
             }
         }
-        return dst;
-    }
 
-    private static double Eetf(double x, double ks, double xPeak)
-    {
-        if (x <= ks || xPeak <= ks)
-            return Math.Min(Math.Max(x, 0.0), 1.0);
-
-        double span = xPeak - ks;
-        double t = (x - ks) / span;
-        if (t >= 1.0)
-            return 1.0;
-
-        double t2 = t * t;
-        double t3 = t2 * t;
-        double y = (((2.0 * t3) - (3.0 * t2) + 1.0) * ks)
-            + ((t3 - (2.0 * t2) + t) * span)
-            + ((-2.0 * t3) + (3.0 * t2));
-        return Math.Clamp(y, 0.0, 1.0);
-    }
-
-    private static byte ToSrgbByte(double linear)
-    {
-        if (linear <= 0.0) return 0;
-        if (linear >= 1.0) return 255;
-        return SrgbByteLut[(int)Math.Round(linear * (SrgbLutSize - 1))];
-    }
-
-    private static byte[] BuildSrgbByteLut()
-    {
-        var lut = new byte[SrgbLutSize];
-        for (int i = 0; i < lut.Length; i++)
-        {
-            double c = (double)i / (lut.Length - 1);
-            double encoded = c <= 0.0031308
-                ? 12.92 * c
-                : (1.055 * Math.Pow(c, 1.0 / 2.4)) - 0.055;
-            lut[i] = ToByte(encoded);
-        }
-        return lut;
-    }
-
-    private static double Clamp01(double v) => v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
-
-    private static byte ToByte(double v01)
-    {
-        double scaled = (v01 * 255.0) + 0.5;
-        if (scaled <= 0.0) return 0;
-        if (scaled >= 255.0) return 255;
-        return (byte)scaled;
+        return new ToneMapper().MapToSdrBgra(
+            scRgba,
+            w,
+            h,
+            sdrWhiteNits,
+            hdrPeakNits,
+            inputIsRec2020);
     }
 
     /// <summary>

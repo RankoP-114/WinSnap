@@ -30,6 +30,9 @@ public sealed class ScrollStitcher
     /// <summary>判定"到底"的新增高度阈值（像素）：新增 ≤ 此值即认为到底。</summary>
     public int BottomThreshold { get; }
 
+    /// <summary>匹配可接受的最大平均 SAD（按 RGB 通道归一化，0=完全一致）。</summary>
+    public double MaxAverageSadPerChannel { get; }
+
     private byte[]? _bgra;      // 结果像素（BGRA，top-down，stride=_width*4）
     private int _width;
     private int _height;        // 当前结果高度
@@ -48,6 +51,12 @@ public sealed class ScrollStitcher
     /// <summary>最近一次 <see cref="Append"/> 实际新增的高度（像素）。首帧为其整高。</summary>
     public int LastAppendedHeight { get; private set; }
 
+    /// <summary>最近一次非首帧追加是否因重叠匹配置信度不足而失败。</summary>
+    public bool LastMatchFailed { get; private set; }
+
+    /// <summary>最近一次匹配的平均 SAD（按 RGB 通道归一化）。匹配未执行时为 0。</summary>
+    public double LastMatchAverageSadPerChannel { get; private set; }
+
     /// <summary>是否已检测到滚动到底（最近一帧几乎无新增内容）。</summary>
     public bool IsAtBottom { get; private set; }
 
@@ -55,16 +64,19 @@ public sealed class ScrollStitcher
         int templateHeight = 120,
         int columnSampleStep = 8,
         int rowSampleStep = 2,
-        int bottomThreshold = 2)
+        int bottomThreshold = 2,
+        double maxAverageSadPerChannel = 24.0)
     {
         if (templateHeight < 1) throw new ArgumentOutOfRangeException(nameof(templateHeight));
         if (columnSampleStep < 1) throw new ArgumentOutOfRangeException(nameof(columnSampleStep));
         if (rowSampleStep < 1) throw new ArgumentOutOfRangeException(nameof(rowSampleStep));
         if (bottomThreshold < 0) throw new ArgumentOutOfRangeException(nameof(bottomThreshold));
+        if (maxAverageSadPerChannel <= 0) throw new ArgumentOutOfRangeException(nameof(maxAverageSadPerChannel));
         TemplateHeight = templateHeight;
         ColumnSampleStep = columnSampleStep;
         RowSampleStep = rowSampleStep;
         BottomThreshold = bottomThreshold;
+        MaxAverageSadPerChannel = maxAverageSadPerChannel;
     }
 
     /// <summary>追加一帧。首帧作基底；其后按重叠对齐追加新增部分。</summary>
@@ -84,6 +96,8 @@ public sealed class ScrollStitcher
             _lastFrameHeight = frame.Height;
             FrameCount = 1;
             LastAppendedHeight = frame.Height;
+            LastMatchFailed = false;
+            LastMatchAverageSadPerChannel = 0.0;
             IsAtBottom = false;
             return;
         }
@@ -94,9 +108,21 @@ public sealed class ScrollStitcher
 
         // 求新帧相对上一帧的竖直对齐：模板取自上一帧底部 H 行
         int h = Math.Min(TemplateHeight, Math.Min(_lastFrameHeight, frame.Height));
-        int newRows = MatchAndComputeNewRows(frame, h, out _);
-
         FrameCount++;
+
+        if (!TryMatchAndComputeNewRows(frame, h, out int newRows, out _, out double averageSad))
+        {
+            LastAppendedHeight = 0;
+            LastMatchFailed = true;
+            LastMatchAverageSadPerChannel = averageSad;
+            IsAtBottom = false;
+            _lastFrame = (byte[])frame.Bgra.Clone();
+            _lastFrameHeight = frame.Height;
+            return;
+        }
+
+        LastMatchFailed = false;
+        LastMatchAverageSadPerChannel = averageSad;
 
         if (newRows <= BottomThreshold)
         {
@@ -123,7 +149,7 @@ public sealed class ScrollStitcher
     {
         if (_bgra is null || _width == 0 || _height == 0)
             return new PixelBuffer(0, 0);
-        var copy = new byte[_height * _width * PixelBuffer.BytesPerPixel];
+        var copy = new byte[checked(_height * _width * PixelBuffer.BytesPerPixel)];
         Buffer.BlockCopy(_bgra, 0, copy, 0, copy.Length);
         return new PixelBuffer(_width, _height, copy);
     }
@@ -138,13 +164,20 @@ public sealed class ScrollStitcher
         _lastFrameHeight = 0;
         FrameCount = 0;
         LastAppendedHeight = 0;
+        LastMatchFailed = false;
+        LastMatchAverageSadPerChannel = 0.0;
         IsAtBottom = false;
     }
 
     /// <summary>
     /// 在新帧中匹配「上一帧底部 h 行」模板，返回新帧底部需追加的行数。
     /// </summary>
-    private int MatchAndComputeNewRows(PixelBuffer frame, int h, out int bestMatchRow)
+    private bool TryMatchAndComputeNewRows(
+        PixelBuffer frame,
+        int h,
+        out int newRows,
+        out int bestMatchRow,
+        out double averageSadPerChannel)
     {
         byte[] last = _lastFrame!;
         int stride = _width * PixelBuffer.BytesPerPixel;
@@ -160,7 +193,7 @@ public sealed class ScrollStitcher
         for (int m = 0; m <= searchMax; m++)
         {
             long sad = ComputeSad(last, tStart, frame.Bgra, m, h, stride, bestSad);
-            if (sad < bestSad)
+            if (sad < bestSad || (sad == bestSad && m > bestRow))
             {
                 bestSad = sad;
                 bestRow = m;
@@ -168,12 +201,18 @@ public sealed class ScrollStitcher
         }
 
         bestMatchRow = bestRow;
+        int sampledRows = ((h - 1) / RowSampleStep) + 1;
+        int sampledCols = ((_width - 1) / ColumnSampleStep) + 1;
+        long sampledChannels = (long)sampledRows * sampledCols * 3;
+        averageSadPerChannel = sampledChannels > 0
+            ? bestSad / (double)sampledChannels
+            : double.PositiveInfinity;
 
         // 新帧行 (bestRow + h) 起为「超出上一帧底部」的新内容
         int firstNewRow = bestRow + h;
-        int newRows = frame.Height - firstNewRow;
+        newRows = frame.Height - firstNewRow;
         if (newRows < 0) newRows = 0;
-        return newRows;
+        return averageSadPerChannel <= MaxAverageSadPerChannel;
     }
 
     /// <summary>
@@ -202,7 +241,7 @@ public sealed class ScrollStitcher
                 sad += Math.Abs(last[li + 1] - cand[ci + 1]); // G
                 sad += Math.Abs(last[li + 2] - cand[ci + 2]); // R
             }
-            if (sad >= currentBest)
+            if (sad > currentBest)
                 return long.MaxValue; // 提前放弃
         }
         return sad;
@@ -213,10 +252,10 @@ public sealed class ScrollStitcher
     {
         if (count <= 0) return;
         int stride = _width * PixelBuffer.BytesPerPixel;
-        int newHeight = _height + count;
-        var grown = new byte[newHeight * stride];
-        Buffer.BlockCopy(_bgra!, 0, grown, 0, _height * stride);
-        Buffer.BlockCopy(frame.Bgra, srcStartRow * stride, grown, _height * stride, count * stride);
+        int newHeight = checked(_height + count);
+        var grown = new byte[checked(newHeight * stride)];
+        Buffer.BlockCopy(_bgra!, 0, grown, 0, checked(_height * stride));
+        Buffer.BlockCopy(frame.Bgra, checked(srcStartRow * stride), grown, checked(_height * stride), checked(count * stride));
         _bgra = grown;
         _height = newHeight;
     }

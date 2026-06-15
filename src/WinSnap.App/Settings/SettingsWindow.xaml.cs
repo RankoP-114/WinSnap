@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Windows;
@@ -12,7 +13,7 @@ namespace WinSnap.App.Settings;
 /// WinUI3 Fluent 风格的设置窗口。分区：主题、截图热键、开机自启、保存格式/目录、放大镜。
 /// <para>
 /// 用法：<c>new SettingsWindow(settingsService).ShowDialog()</c>。
-/// 点"保存"会把界面值写回 <see cref="SettingsService.Current"/> 并 <see cref="SettingsService.Save()"/>，
+/// 点"保存"会把界面值写入新的 <see cref="AppSettings"/> 并通过 <see cref="SettingsService.Save(AppSettings)"/> 落盘，
 /// 然后触发 <see cref="Saved"/> 事件并以 <c>DialogResult = true</c> 关闭；点"取消"不落盘。
 /// </para>
 /// <para>
@@ -29,18 +30,15 @@ public partial class SettingsWindow : Window
     private bool _loading; // 初始化加载期间抑制主题预览等事件副作用
 
     /// <summary>
-    /// 保存成功后触发。订阅方应据此重注册全局热键并应用主题
-    /// （例如读 <see cref="SettingsService.Current"/> 调用
-    /// <c>HotkeyManager.RegisterCaptureHotkey(settings.Current.CaptureHotkey)</c>）。
+    /// 保存成功后触发。订阅方应据此应用需要在配置落盘后生效的运行时状态。
     /// </summary>
     public event EventHandler? Saved;
 
     /// <summary>
-    /// 保存时若截图热键发生了变化，则额外触发本事件，参数为新的热键字符串
-    /// （如 <c>"Ctrl+Alt+A"</c>）。订阅方可直接据此重注册，无需再读配置。
-    /// 未变化则不触发。
+    /// 保存时若任一全局热键发生变化，则额外触发本事件，参数为新的截图 / 钉图 / 长截图热键。
+    /// 订阅方应在返回 true 前完成注册；返回 false 时本窗口不落盘。
     /// </summary>
-    public event Action<string>? CaptureHotkeyChanged;
+    public event Func<string, string, string, bool>? HotkeysChanged;
 
     /// <summary>
     /// 创建设置窗口。<paramref name="settings"/> 应为应用共享的同一 <see cref="SettingsService"/>
@@ -72,6 +70,8 @@ public partial class SettingsWindow : Window
 
             // ② 截图热键
             CaptureHotkeyRecorder.Hotkey = s.CaptureHotkey ?? string.Empty;
+            PinHotkeyRecorder.Hotkey = s.PinHotkey ?? string.Empty;
+            ScrollHotkeyRecorder.Hotkey = s.ScrollCaptureHotkey ?? string.Empty;
 
             // ③ 开机自启：以注册表实际状态为准（与配置可能不同步时，注册表优先反映真实情况）
             string? exe = Environment.ProcessPath;
@@ -83,17 +83,26 @@ public partial class SettingsWindow : Window
                 || string.Equals(s.DefaultSaveFormat, "jpeg", StringComparison.OrdinalIgnoreCase);
             FormatJpgRadio.IsChecked = isJpg;
             FormatPngRadio.IsChecked = !isJpg;
+            JpegQualityTextBox.Text = ClampJpegQuality(s.JpegQuality).ToString(CultureInfo.InvariantCulture);
             SaveDirTextBox.Text = s.LastSaveDirectory ?? string.Empty;
 
-            // ⑤ GIF 录制
+            // ⑤ HDR 色调映射
+            double hdrSdrWhite = ClampHdrSdrWhite(s.HdrSdrWhiteLevelNits);
+            HdrSdrWhiteTextBox.Text = hdrSdrWhite.ToString("0", CultureInfo.InvariantCulture);
+            HdrPeakTextBox.Text = ClampHdrPeak(s.HdrPeakNits, hdrSdrWhite).ToString("0", CultureInfo.InvariantCulture);
+
+            // ⑥ GIF 录制
             GifDefaultDurationTextBox.Text = ClampGifDuration(s.GifDefaultDurationSeconds).ToString();
             GifCountdownTextBox.Text = ClampGifCountdown(s.GifCountdownSeconds).ToString();
             GifFpsTextBox.Text = ClampGifFps(s.GifFramesPerSecond).ToString();
 
-            // ⑥ 放大镜
+            // ⑦ 放大镜
             MagnifierCheck.IsChecked = s.ShowMagnifier;
 
-            // ⑦ 关于
+            // ⑧ 诊断
+            LoggingCheck.IsChecked = s.EnableLogging;
+
+            // ⑨ 关于
             VersionTextBlock.Text = $"版本 {GetAppVersion()}";
         }
         finally
@@ -158,23 +167,29 @@ public partial class SettingsWindow : Window
     {
         var s = _settings.Current;
 
-        // 记录变更前的热键，便于判断是否需要通知重注册。
-        string oldHotkey = s.CaptureHotkey ?? string.Empty;
-
-        // ① 主题
         string theme = SelectedTheme();
-        s.Theme = theme;
 
-        // ② 截图热键：仅当录入了合法（非空）值时才覆盖，避免误清空导致无快捷键。
-        string newHotkey = CaptureHotkeyRecorder.Hotkey;
-        if (!string.IsNullOrWhiteSpace(newHotkey))
-            s.CaptureHotkey = newHotkey;
+        // 记录变更前的热键，便于判断是否需要通知重注册。截图热键不允许清空。
+        string oldCaptureHotkey = s.CaptureHotkey ?? string.Empty;
+        string oldPinHotkey = s.PinHotkey ?? string.Empty;
+        string oldScrollHotkey = s.ScrollCaptureHotkey ?? string.Empty;
+        string requestedCaptureHotkey = string.IsNullOrWhiteSpace(CaptureHotkeyRecorder.Hotkey)
+            ? oldCaptureHotkey
+            : CaptureHotkeyRecorder.Hotkey;
+        string requestedPinHotkey = PinHotkeyRecorder.Hotkey ?? string.Empty;
+        string requestedScrollHotkey = ScrollHotkeyRecorder.Hotkey ?? string.Empty;
 
-        // ④ 保存格式与目录
-        s.DefaultSaveFormat = FormatJpgRadio.IsChecked == true ? "jpg" : "png";
-        s.LastSaveDirectory = string.IsNullOrWhiteSpace(SaveDirTextBox.Text)
+        string saveFormat = FormatJpgRadio.IsChecked == true ? "jpg" : "png";
+        string? saveDirectory = string.IsNullOrWhiteSpace(SaveDirTextBox.Text)
             ? null
             : SaveDirTextBox.Text;
+
+        if (!TryReadIntRange(JpegQualityTextBox.Text, 1, 100, "JPG 质量", out int jpegQuality))
+            return;
+        if (!TryReadDoubleRange(HdrSdrWhiteTextBox.Text, 80.0, 1000.0, "SDR 白点亮度", out double hdrSdrWhite))
+            return;
+        if (!TryReadDoubleRange(HdrPeakTextBox.Text, hdrSdrWhite, 4000.0, "HDR 峰值亮度", out double hdrPeak))
+            return;
 
         // ⑤ GIF 录制
         if (!TryReadIntRange(GifDefaultDurationTextBox.Text, 1, 60, "默认录制秒数", out int gifDuration))
@@ -184,27 +199,65 @@ public partial class SettingsWindow : Window
         if (!TryReadIntRange(GifFpsTextBox.Text, 1, 20, "每秒帧数（FPS）", out int gifFps))
             return;
 
-        s.GifDefaultDurationSeconds = gifDuration;
-        s.GifCountdownSeconds = gifCountdown;
-        s.GifFramesPerSecond = gifFps;
-
-        // ⑥ 放大镜
-        s.ShowMagnifier = MagnifierCheck.IsChecked == true;
+        bool hotkeysChanged =
+            !string.Equals(oldCaptureHotkey, requestedCaptureHotkey, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(oldPinHotkey, requestedPinHotkey, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(oldScrollHotkey, requestedScrollHotkey, StringComparison.OrdinalIgnoreCase);
+        if (hotkeysChanged && HotkeysChanged is { } hotkeysChangedHandler &&
+            !hotkeysChangedHandler.Invoke(requestedCaptureHotkey, requestedPinHotkey, requestedScrollHotkey))
+        {
+            MessageBox.Show(this,
+                "全局热键注册失败，可能已被其它程序占用。设置未保存，原热键已保留。",
+                "热键被占用",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
 
         // ③ 开机自启：写注册表，并同步 RunAtStartup 字段。失败不阻断保存。
         bool wantAutoStart = AutoStartCheck.IsChecked == true;
         ApplyAutoStart(wantAutoStart);
-        s.RunAtStartup = wantAutoStart;
+
+        var updated = new AppSettings
+        {
+            Theme = theme,
+            CaptureHotkey = requestedCaptureHotkey,
+            PinHotkey = requestedPinHotkey,
+            ScrollCaptureHotkey = requestedScrollHotkey,
+            DefaultSaveFormat = saveFormat,
+            JpegQuality = jpegQuality,
+            LastSaveDirectory = saveDirectory,
+            HdrSdrWhiteLevelNits = hdrSdrWhite,
+            HdrPeakNits = hdrPeak,
+            GifDefaultDurationSeconds = gifDuration,
+            GifCountdownSeconds = gifCountdown,
+            GifFramesPerSecond = gifFps,
+            ShowMagnifier = MagnifierCheck.IsChecked == true,
+            EnableLogging = LoggingCheck.IsChecked == true,
+            RunAtStartup = wantAutoStart,
+        };
 
         // 落盘
-        _settings.Save();
+        try
+        {
+            _settings.Save(updated);
+        }
+        catch (Exception ex)
+        {
+            if (hotkeysChanged && HotkeysChanged is { } restoreHotkeys)
+                restoreHotkeys.Invoke(oldCaptureHotkey, oldPinHotkey, oldScrollHotkey);
+
+            MessageBox.Show(this,
+                ex.Message,
+                "保存设置失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
 
         // 应用主题到整个应用
         ThemeManager.Apply(theme);
 
-        // 通知订阅方
-        if (!string.Equals(oldHotkey, s.CaptureHotkey, StringComparison.OrdinalIgnoreCase))
-            CaptureHotkeyChanged?.Invoke(s.CaptureHotkey ?? string.Empty);
         Saved?.Invoke(this, EventArgs.Empty);
 
         DialogResult = true;
@@ -254,11 +307,36 @@ public partial class SettingsWindow : Window
         return false;
     }
 
+    private bool TryReadDoubleRange(string text, double min, double max, string label, out double value)
+    {
+        if (double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out value) ||
+            double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.CurrentCulture, out value))
+        {
+            if (!double.IsNaN(value) && !double.IsInfinity(value) && value >= min && value <= max)
+                return true;
+        }
+
+        MessageBox.Show(this,
+            $"{label} 需要填写 {min:0} 到 {max:0} 之间的数字。",
+            "WinSnap",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
+        return false;
+    }
+
     private static int ClampGifDuration(int value) => Math.Clamp(value, 1, 60);
 
     private static int ClampGifCountdown(int value) => Math.Clamp(value, 0, 10);
 
     private static int ClampGifFps(int value) => Math.Clamp(value, 1, 20);
+
+    private static int ClampJpegQuality(int value) => Math.Clamp(value, 1, 100);
+
+    private static double ClampHdrSdrWhite(double value)
+        => double.IsNaN(value) || double.IsInfinity(value) ? 300.0 : Math.Clamp(value, 80.0, 1000.0);
+
+    private static double ClampHdrPeak(double value, double sdrWhite)
+        => double.IsNaN(value) || double.IsInfinity(value) ? 1000.0 : Math.Clamp(value, sdrWhite, 4000.0);
 
     private static string GetAppVersion()
     {

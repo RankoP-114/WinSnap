@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using Hardcodet.Wpf.TaskbarNotification;
@@ -21,6 +22,12 @@ public sealed class TrayService : IDisposable
     /// <summary>请求长截图（滚动拼接）。</summary>
     public event Action? LongCaptureRequested;
 
+    /// <summary>请求 GIF 录制。</summary>
+    public event Action? GifCaptureRequested;
+
+    /// <summary>请求关闭所有钉图窗口。</summary>
+    public event Action? CloseAllPinsRequested;
+
     public void Initialize()
     {
         _icon = new TaskbarIcon
@@ -38,6 +45,14 @@ public sealed class TrayService : IDisposable
         var longCaptureItem = new MenuItem { Header = "长截图（滚动）" };
         longCaptureItem.Click += (_, _) => LongCaptureRequested?.Invoke();
         menu.Items.Add(longCaptureItem);
+
+        var gifCaptureItem = new MenuItem { Header = "GIF 录制" };
+        gifCaptureItem.Click += (_, _) => GifCaptureRequested?.Invoke();
+        menu.Items.Add(gifCaptureItem);
+
+        var closePinsItem = new MenuItem { Header = "关闭所有钉图" };
+        closePinsItem.Click += (_, _) => CloseAllPinsRequested?.Invoke();
+        menu.Items.Add(closePinsItem);
 
         var settingsItem = new MenuItem { Header = "设置..." };
         settingsItem.Click += (_, _) => SettingsRequested?.Invoke();
@@ -60,8 +75,45 @@ public sealed class TrayService : IDisposable
         Log.Information("托盘已初始化");
     }
 
-    /// <summary>使用系统默认应用图标，避免仓库依赖二进制 ico 资源。</summary>
-    private static System.Drawing.Icon LoadAppIcon() => System.Drawing.SystemIcons.Application;
+    /// <summary>
+    /// 优先使用本地未入库 ico 编进 exe 后的关联图标；开发环境下也可直接读取 Assets\WinSnap.ico。
+    /// ico 文件由 .gitignore 排除，不进入 GitHub。
+    /// </summary>
+    private static System.Drawing.Icon LoadAppIcon()
+    {
+        try
+        {
+            if (Environment.ProcessPath is string exe && File.Exists(exe))
+            {
+                using var associatedIcon = System.Drawing.Icon.ExtractAssociatedIcon(exe);
+                if (associatedIcon is not null)
+                    return (System.Drawing.Icon)associatedIcon.Clone();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "读取 exe 关联图标失败，尝试本地 ico 文件");
+        }
+
+        try
+        {
+            string localIconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "WinSnap.ico");
+            if (!File.Exists(localIconPath))
+                localIconPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Assets", "WinSnap.ico"));
+
+            if (File.Exists(localIconPath))
+            {
+                using var icon = new System.Drawing.Icon(localIconPath);
+                return (System.Drawing.Icon)icon.Clone();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "读取本地 ico 文件失败，回退系统默认图标");
+        }
+
+        return System.Drawing.SystemIcons.Application;
+    }
 
     /// <summary>弹出气泡提示。</summary>
     public void ShowMessage(string title, string message)

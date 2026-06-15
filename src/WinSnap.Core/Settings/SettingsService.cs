@@ -24,6 +24,12 @@ public sealed class SettingsService
     /// <summary>当前内存中的配置（始终非 null）。</summary>
     public AppSettings Current { get; private set; } = new();
 
+    /// <summary>最近一次加载配置失败的异常；成功加载时为 null。</summary>
+    public Exception? LastLoadError { get; private set; }
+
+    /// <summary>最近一次保存配置失败的异常；成功保存时为 null。</summary>
+    public Exception? LastSaveError { get; private set; }
+
     public SettingsService()
     {
         _dir = Path.Combine(
@@ -40,6 +46,7 @@ public sealed class SettingsService
     {
         lock (_gate)
         {
+            LastLoadError = null;
             try
             {
                 if (File.Exists(_path))
@@ -54,9 +61,10 @@ public sealed class SettingsService
                     SaveInternal(Current);
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 // 配置损坏 -> 回退默认，不抛出
+                LastLoadError = ex;
                 Current = new AppSettings();
             }
 
@@ -64,16 +72,25 @@ public sealed class SettingsService
         }
     }
 
-    /// <summary>保存当前配置。</summary>
-    public void Save() => Save(Current);
-
     /// <summary>用指定配置覆盖并持久化。</summary>
     public void Save(AppSettings settings)
     {
+        ArgumentNullException.ThrowIfNull(settings);
+
         lock (_gate)
         {
-            Current = settings;
-            SaveInternal(settings);
+            LastSaveError = null;
+            try
+            {
+                SaveInternal(settings);
+                Current = settings;
+            }
+            catch (Exception ex)
+            {
+                LastSaveError = ex;
+                TryDeleteTempFile();
+                throw new IOException($"保存设置失败：{_path}", ex);
+            }
         }
     }
 
@@ -90,5 +107,19 @@ public sealed class SettingsService
             File.Replace(tmp, _path, destinationBackupFileName: null);
         else
             File.Move(tmp, _path);
+    }
+
+    private void TryDeleteTempFile()
+    {
+        try
+        {
+            var tmp = _path + ".tmp";
+            if (File.Exists(tmp))
+                File.Delete(tmp);
+        }
+        catch
+        {
+            // 保存失败时清理临时文件只是尽力而为，不能覆盖原始异常。
+        }
     }
 }

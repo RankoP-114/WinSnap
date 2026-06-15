@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -21,24 +22,49 @@ public static class GdiCapture
     /// <summary>抓取虚拟桌面坐标系下的指定物理像素矩形。</summary>
     public static CapturedImage CaptureRegion(int x, int y, int width, int height)
     {
+        if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+
         IntPtr screenDc = NativeMethods.GetDC(IntPtr.Zero);
-        IntPtr memDc = NativeMethods.CreateCompatibleDC(screenDc);
-        IntPtr hBitmap = NativeMethods.CreateCompatibleBitmap(screenDc, width, height);
-        IntPtr oldObj = NativeMethods.SelectObject(memDc, hBitmap);
+        if (screenDc == IntPtr.Zero)
+            ThrowLastWin32("GetDC");
+
+        IntPtr memDc = IntPtr.Zero;
+        IntPtr hBitmap = IntPtr.Zero;
+        IntPtr oldObj = IntPtr.Zero;
         try
         {
-            NativeMethods.BitBlt(memDc, 0, 0, width, height, screenDc, x, y,
-                NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT);
+            memDc = NativeMethods.CreateCompatibleDC(screenDc);
+            if (memDc == IntPtr.Zero)
+                ThrowLastWin32("CreateCompatibleDC");
+
+            hBitmap = NativeMethods.CreateCompatibleBitmap(screenDc, width, height);
+            if (hBitmap == IntPtr.Zero)
+                ThrowLastWin32("CreateCompatibleBitmap");
+
+            oldObj = NativeMethods.SelectObject(memDc, hBitmap);
+            if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
+                ThrowLastWin32("SelectObject");
+
+            if (!NativeMethods.BitBlt(memDc, 0, 0, width, height, screenDc, x, y,
+                    NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT))
+            {
+                ThrowLastWin32("BitBlt");
+            }
 
             using var bmp = Image.FromHbitmap(hBitmap);
             return ToBgra(bmp);
         }
         finally
         {
-            NativeMethods.SelectObject(memDc, oldObj);
-            NativeMethods.DeleteObject(hBitmap);
-            NativeMethods.DeleteDC(memDc);
-            NativeMethods.ReleaseDC(IntPtr.Zero, screenDc);
+            if (memDc != IntPtr.Zero && oldObj != IntPtr.Zero && oldObj != new IntPtr(-1))
+                NativeMethods.SelectObject(memDc, oldObj);
+            if (hBitmap != IntPtr.Zero)
+                NativeMethods.DeleteObject(hBitmap);
+            if (memDc != IntPtr.Zero)
+                NativeMethods.DeleteDC(memDc);
+            if (screenDc != IntPtr.Zero)
+                NativeMethods.ReleaseDC(IntPtr.Zero, screenDc);
         }
     }
 
@@ -61,5 +87,11 @@ public static class GdiCapture
         {
             bmp.UnlockBits(data);
         }
+    }
+
+    private static void ThrowLastWin32(string api)
+    {
+        int error = Marshal.GetLastWin32Error();
+        throw new InvalidOperationException($"{api} 失败：{new Win32Exception(error).Message} (0x{error:X8})");
     }
 }

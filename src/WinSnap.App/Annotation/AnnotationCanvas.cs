@@ -13,14 +13,51 @@ namespace WinSnap.App.Annotation;
 public sealed class AnnotationCanvas : FrameworkElement
 {
     private AnnotationElement? _preview;
+    private readonly Dictionary<MosaicCacheKey, BitmapSource> _mosaicCache = new();
+    private readonly HashSet<MosaicCacheKey> _liveMosaicKeys = new();
+    private BitmapSource? _mosaicSource;
+    private int _mosaicOriginX;
+    private int _mosaicOriginY;
 
     /// <summary>渲染所用的标注文档（可注入会话共享文档）。</summary>
     public AnnotationDocument Document { get; set; } = new();
 
     /// <summary>用于马赛克取样的整屏背景（绝对物理像素，原点对应 (MosaicOriginX, MosaicOriginY)）。</summary>
-    public BitmapSource? MosaicSource { get; set; }
-    public int MosaicOriginX { get; set; }
-    public int MosaicOriginY { get; set; }
+    public BitmapSource? MosaicSource
+    {
+        get => _mosaicSource;
+        set
+        {
+            if (ReferenceEquals(_mosaicSource, value))
+                return;
+            _mosaicSource = value;
+            _mosaicCache.Clear();
+        }
+    }
+
+    public int MosaicOriginX
+    {
+        get => _mosaicOriginX;
+        set
+        {
+            if (_mosaicOriginX == value)
+                return;
+            _mosaicOriginX = value;
+            _mosaicCache.Clear();
+        }
+    }
+
+    public int MosaicOriginY
+    {
+        get => _mosaicOriginY;
+        set
+        {
+            if (_mosaicOriginY == value)
+                return;
+            _mosaicOriginY = value;
+            _mosaicCache.Clear();
+        }
+    }
 
     public void SetPreview(AnnotationElement? element) => _preview = element;
 
@@ -29,8 +66,11 @@ public sealed class AnnotationCanvas : FrameworkElement
     protected override void OnRender(DrawingContext dc)
     {
         base.OnRender(dc);
+        _liveMosaicKeys.Clear();
         foreach (var element in Document.InZOrder())
-            RenderElement(dc, element, MosaicSource, MosaicOriginX, MosaicOriginY);
+            RenderElementCached(dc, element);
+        PruneMosaicCache();
+
         if (_preview is not null)
             RenderElement(dc, _preview, MosaicSource, MosaicOriginX, MosaicOriginY);
     }
@@ -55,22 +95,96 @@ public sealed class AnnotationCanvas : FrameworkElement
         int mosaicOriginX,
         int mosaicOriginY)
     {
-        var r = mosaic.Rect.Normalized();
-        if (r.Width < 1 || r.Height < 1)
+        if (!TryGetMosaicLayout(
+                mosaic,
+                mosaicSource,
+                mosaicOriginX,
+                mosaicOriginY,
+                out int sx,
+                out int sy,
+                out int w,
+                out int h,
+                out Rect destRect))
             return;
 
-        int sx = r.X - mosaicOriginX, sy = r.Y - mosaicOriginY;
-        int w = r.Width, h = r.Height;
+        var pixelated = Pixelate(mosaicSource, sx, sy, w, h, Math.Max(4, mosaic.BlockSize));
+        dc.DrawImage(pixelated, destRect);
+    }
+
+    private void RenderElementCached(DrawingContext dc, AnnotationElement element)
+    {
+        if (element is not MosaicAnnotation mosaic || MosaicSource is not { } source)
+        {
+            RenderElement(dc, element, MosaicSource, MosaicOriginX, MosaicOriginY);
+            return;
+        }
+
+        if (!TryGetMosaicLayout(
+                mosaic,
+                source,
+                MosaicOriginX,
+                MosaicOriginY,
+                out int sx,
+                out int sy,
+                out int w,
+                out int h,
+                out Rect destRect))
+            return;
+
+        int block = Math.Max(4, mosaic.BlockSize);
+        var key = new MosaicCacheKey(mosaic.Id, sx, sy, w, h, block, mosaic.Mode);
+        _liveMosaicKeys.Add(key);
+        if (!_mosaicCache.TryGetValue(key, out BitmapSource? pixelated))
+        {
+            pixelated = Pixelate(source, sx, sy, w, h, block);
+            _mosaicCache[key] = pixelated;
+        }
+
+        dc.DrawImage(pixelated, destRect);
+    }
+
+    private void PruneMosaicCache()
+    {
+        foreach (var key in _mosaicCache.Keys.ToArray())
+        {
+            if (!_liveMosaicKeys.Contains(key))
+                _mosaicCache.Remove(key);
+        }
+    }
+
+    private static bool TryGetMosaicLayout(
+        MosaicAnnotation mosaic,
+        BitmapSource mosaicSource,
+        int mosaicOriginX,
+        int mosaicOriginY,
+        out int sx,
+        out int sy,
+        out int w,
+        out int h,
+        out Rect destination)
+    {
+        destination = Rect.Empty;
+        var r = mosaic.Rect.Normalized();
+        if (r.Width < 1 || r.Height < 1)
+        {
+            sx = sy = w = h = 0;
+            return false;
+        }
+
+        sx = r.X - mosaicOriginX;
+        sy = r.Y - mosaicOriginY;
+        w = r.Width;
+        h = r.Height;
         // 夹紧到背景范围，超出部分忽略
         if (sx < 0) { w += sx; sx = 0; }
         if (sy < 0) { h += sy; sy = 0; }
         if (sx + w > mosaicSource.PixelWidth) w = mosaicSource.PixelWidth - sx;
         if (sy + h > mosaicSource.PixelHeight) h = mosaicSource.PixelHeight - sy;
         if (w < 1 || h < 1)
-            return;
+            return false;
 
-        var pixelated = Pixelate(mosaicSource, sx, sy, w, h, Math.Max(4, mosaic.BlockSize));
-        dc.DrawImage(pixelated, new Rect(mosaicOriginX + sx, mosaicOriginY + sy, w, h));
+        destination = new Rect(mosaicOriginX + sx, mosaicOriginY + sy, w, h);
+        return true;
     }
 
     /// <summary>对背景某区域做块平均像素化，返回 Bgra32 位图。</summary>
@@ -107,4 +221,13 @@ public sealed class AnnotationCanvas : FrameworkElement
         result.Freeze();
         return result;
     }
+
+    private readonly record struct MosaicCacheKey(
+        Guid ElementId,
+        int SourceX,
+        int SourceY,
+        int Width,
+        int Height,
+        int BlockSize,
+        MosaicMode Mode);
 }

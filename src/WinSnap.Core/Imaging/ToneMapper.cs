@@ -3,23 +3,24 @@ namespace WinSnap.Core.Imaging;
 /// <summary>
 /// HDR scRGB（线性 FP16，(1,1,1)=D65 白 80 nits，可超 1.0）→ SDR sRGB 8bit BGRA 的色调映射器。
 ///
-/// 采用 <b>maxRGB</b> 色调映射 + <b>BT.2390 风格 Hermite 肩部</b>（含 black boost）保色相压高光：
+/// 采用 <b>maxRGB</b> 色调映射 + <b>单调 shoulder 滚降</b>（含 black boost）保色相压高光：
 /// ① 按 scRGB 语义把线性值换算为绝对亮度（value × 80 nits），再以 <c>sdrWhiteNits</c> 归一化为
 ///    「相对 SDR 白」的线性光（SDR 参考白 = 1.0）；
-/// ② 取 maxRGB 走 EETF：膝点以下（含 SDR 白）恒等直通，膝点以上用三次 Hermite 把源峰值
-///    <c>hdrPeakNits</c>（归一后 = hdrPeak/sdrWhite）平滑滚降到 1.0，按增益等比缩放 RGB
+/// ② 取 maxRGB 走 EETF：膝点以下恒等直通，膝点以上用幂函数 shoulder 把源峰值
+///    <c>hdrPeakNits</c>（归一后 = hdrPeak/sdrWhite）单调滚降到 1.0，按增益等比缩放 RGB
 ///    （maxRGB 法 → 保色相，不溢出，单调）；black boost 抬升极暗部；
 /// ③ Rec.2020→Rec.709 色域 3×3 矩阵；
 /// ④ sRGB OETF（gamma）编码为 8bit，输出 BGRA。
 ///
-/// 设计取舍：BT.2390 字面定义工作在 PQ 绝对域，但那会令 SDR 参考白本身落入肩部被压暗
-/// （≈235/255）。为满足「SDR 参考白 → 约 255」且保留 BT.2390 的 Hermite 肩部形态与 black
-/// boost，本实现把 EETF 工作域选在「以 SDR 白归一化的相对线性光」上，膝点取 SDR 白(=1.0)，
-/// 故白点精确直通、仅压其上的高光至 peak。纯托管、无原生依赖，便于单测。
+/// 设计取舍：BT.2390 字面定义工作在 PQ 绝对域，但那会令 SDR 参考白本身落入肩部被压暗。
+/// 本实现把 EETF 工作域选在「以 SDR 白归一化的相对线性光」上，膝点略低于 SDR 白，
+/// 令 SDR 白保持接近满白，同时给白点以上高光留下可见滚降空间。纯托管、无原生依赖，便于单测。
 /// </summary>
 public sealed class ToneMapper
 {
     private const double ScrgbWhiteNits = 80.0; // scRGB: 线性 1.0 == 80 nits
+    private const double KneeStart = 0.95;
+    private const double ShoulderPower = 0.5;
 
     /// <summary>默认 SDR 参考白亮度（nits）。</summary>
     public const double DefaultSdrWhiteNits = 300.0;
@@ -59,15 +60,15 @@ public sealed class ToneMapper
             throw new ArgumentException(
                 $"输入长度应为 {expected}（{width}x{height}*4），实际 {scRgbaLinear.Length}。",
                 nameof(scRgbaLinear));
-        if (sdrWhiteNits <= 0) throw new ArgumentOutOfRangeException(nameof(sdrWhiteNits));
-        if (hdrPeakNits <= 0) throw new ArgumentOutOfRangeException(nameof(hdrPeakNits));
+        if (!IsPositiveFinite(sdrWhiteNits)) throw new ArgumentOutOfRangeException(nameof(sdrWhiteNits));
+        if (!IsPositiveFinite(hdrPeakNits)) throw new ArgumentOutOfRangeException(nameof(hdrPeakNits));
         if (hdrPeakNits < sdrWhiteNits) hdrPeakNits = sdrWhiteNits; // peak 不应低于白点
 
         var dst = new byte[expected];
 
-        // EETF 参数（相对 SDR 白线性域）：膝点 = 白点(1.0)，源峰值归一 = hdrPeak/sdrWhite
+        // EETF 参数（相对 SDR 白线性域）：膝点略低于白点，源峰值归一 = hdrPeak/sdrWhite。
         double xPeak = hdrPeakNits / sdrWhiteNits; // >= 1
-        const double ks = 1.0;                     // knee start：SDR 白
+        const double ks = KneeStart;
         double invSdrWhite = 1.0 / sdrWhiteNits;
         double scaleScrgbToRel = ScrgbWhiteNits * invSdrWhite; // scRGB→相对SDR白线性 的合成系数
 
@@ -75,20 +76,12 @@ public sealed class ToneMapper
         for (int i = 0; i < pixelCount; i++)
         {
             int s = i * 4;
-            double r = scRgbaLinear[s];
-            double g = scRgbaLinear[s + 1];
-            double b = scRgbaLinear[s + 2];
             float aF = scRgbaLinear[s + 3];
 
-            // 负值钳零（scRGB 理论可表负，SDR 输出无意义）
-            if (r < 0) r = 0;
-            if (g < 0) g = 0;
-            if (b < 0) b = 0;
-
             // ① scRGB → 相对 SDR 白线性（白点 = 1.0）
-            double rRel = r * scaleScrgbToRel;
-            double gRel = g * scaleScrgbToRel;
-            double bRel = b * scaleScrgbToRel;
+            double rRel = ToRelativeSdrWhite(scRgbaLinear[s], scaleScrgbToRel, xPeak);
+            double gRel = ToRelativeSdrWhite(scRgbaLinear[s + 1], scaleScrgbToRel, xPeak);
+            double bRel = ToRelativeSdrWhite(scRgbaLinear[s + 2], scaleScrgbToRel, xPeak);
 
             // ② maxRGB EETF：对峰值通道求肩部压缩增益，等比缩放（保色相）
             double maxRel = Math.Max(rRel, Math.Max(gRel, bRel));
@@ -125,7 +118,7 @@ public sealed class ToneMapper
             byte r8 = ToByte(SrgbOetf(r709));
             byte g8 = ToByte(SrgbOetf(g709));
             byte b8 = ToByte(SrgbOetf(b709));
-            byte a8 = ToByte(Math.Clamp(aF, 0f, 1f));
+            byte a8 = ToByte(Clamp01OrDefault(aF, fallback: 1.0));
 
             // BGRA
             dst[s] = b8;
@@ -139,33 +132,27 @@ public sealed class ToneMapper
 
     /// <summary>
     /// 相对线性域的 maxRGB EETF：把相对 SDR 白亮度 <paramref name="x"/>（白=1）压到 [0,1]。
-    /// x ≤ <paramref name="ks"/> 恒等；x &gt; ks 用三次 Hermite 把 [ks, xPeak] 滚降到 [ks, 1]
-    /// （膝点处 C1 连续、斜率=1）；末尾施加 black boost。
+    /// x ≤ <paramref name="ks"/> 恒等；x &gt; ks 用单调 shoulder 把 [ks, xPeak] 滚降到 [ks, 1]；
+    /// 末尾施加 black boost。
     /// </summary>
     private double Eetf(double x, double ks, double xPeak)
     {
+        if (double.IsNaN(x) || x <= 0.0) return 0.0;
+        if (double.IsPositiveInfinity(x)) return 1.0;
+
         double y;
         if (x <= ks || xPeak <= ks)
         {
             y = Math.Min(x, 1.0);
         }
+        else if (x >= xPeak)
+        {
+            y = 1.0; // 峰值及以上 → 满白，不溢出
+        }
         else
         {
-            double span = xPeak - ks;
-            double t = (x - ks) / span;
-            if (t >= 1.0)
-            {
-                y = 1.0; // 峰值及以上 → 满白，不溢出
-            }
-            else
-            {
-                double t2 = t * t;
-                double t3 = t2 * t;
-                // BT.2390 肩部多项式：g(0)=ks, g(1)=1, g'(0)=1（相切线性段）
-                y = (((2.0 * t3) - (3.0 * t2) + 1.0) * ks)
-                  + ((t3 - (2.0 * t2) + t) * span)
-                  + ((-2.0 * t3) + (3.0 * t2));
-            }
+            double t = (x - ks) / (xPeak - ks);
+            y = ks + ((1.0 - ks) * Math.Pow(t, ShoulderPower));
         }
 
         // black boost（BT.2390 形式）：minLum*(1-y)^4
@@ -175,7 +162,7 @@ public sealed class ToneMapper
             y += BlackBoost * inv * inv * inv * inv;
         }
 
-        return y < 0.0 ? 0.0 : (y > 1.0 ? 1.0 : y);
+        return Clamp01(y);
     }
 
     /// <summary>sRGB OETF：线性 [0,1] → sRGB 编码 [0,1]。</summary>
@@ -185,7 +172,32 @@ public sealed class ToneMapper
         return (1.055 * Math.Pow(c, 1.0 / 2.4)) - 0.055;
     }
 
-    private static double Clamp01(double v) => v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+    private static bool IsPositiveFinite(double v)
+        => v > 0.0 && !double.IsNaN(v) && !double.IsInfinity(v);
+
+    private static double ToRelativeSdrWhite(float value, double scaleScrgbToRel, double xPeak)
+    {
+        double v = value;
+        if (double.IsNaN(v) || v <= 0.0 || double.IsNegativeInfinity(v))
+            return 0.0;
+        if (double.IsPositiveInfinity(v))
+            return xPeak;
+
+        return v * scaleScrgbToRel;
+    }
+
+    private static double Clamp01(double v)
+    {
+        if (double.IsNaN(v) || v <= 0.0) return 0.0;
+        if (double.IsPositiveInfinity(v) || v >= 1.0) return 1.0;
+        return v;
+    }
+
+    private static double Clamp01OrDefault(double v, double fallback)
+    {
+        if (double.IsNaN(v)) return Clamp01(fallback);
+        return Clamp01(v);
+    }
 
     private static byte ToByte(double v01)
     {

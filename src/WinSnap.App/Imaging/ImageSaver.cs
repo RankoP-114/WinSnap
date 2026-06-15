@@ -19,7 +19,7 @@ public static class ImageSaver
         encoder.Save(fs);
     }
 
-    /// <summary>默认文件名，如 WinSnap_20260604_141530.png。</summary>
+    /// <summary>默认文件名，如 Screenshot_20260604_141530.png。</summary>
     public static string BuildDefaultFileName(string format)
-        => $"WinSnap_{DateTime.Now:yyyyMMdd_HHmmss}.{format}";
+        => $"Screenshot_{DateTime.Now:yyyyMMdd_HHmmss}.{format}";
 }

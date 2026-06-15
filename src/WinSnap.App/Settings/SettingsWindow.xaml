@@ -59,13 +59,22 @@
                                  Checked="OnThemeRadioChecked" />
                 </StackPanel>
 
-                <!-- ② 截图热键 -->
-                <TextBlock Text="截图热键" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <!-- ② 全局热键 -->
+                <TextBlock Text="全局热键" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
                 <StackPanel Margin="4,0,0,20">
                     <TextBlock Text="点击下方方框后按下组合键（如 Ctrl + Alt + A）"
                                Foreground="#FF888888"
                                Margin="0,0,0,6" />
+                    <TextBlock Text="截图" Margin="0,0,0,4" />
                     <local:HotkeyRecorderControl x:Name="CaptureHotkeyRecorder"
+                                                 HorizontalAlignment="Left"
+                                                 Margin="0,0,0,10" />
+                    <TextBlock Text="钉图" Margin="0,0,0,4" />
+                    <local:HotkeyRecorderControl x:Name="PinHotkeyRecorder"
+                                                 HorizontalAlignment="Left"
+                                                 Margin="0,0,0,10" />
+                    <TextBlock Text="长截图" Margin="0,0,0,4" />
+                    <local:HotkeyRecorderControl x:Name="ScrollHotkeyRecorder"
                                                  HorizontalAlignment="Left" />
                 </StackPanel>
 
@@ -90,6 +99,14 @@
                                      GroupName="SaveFormat" />
                     </StackPanel>
 
+                    <TextBlock Text="JPG 质量（1-100）" Margin="0,0,0,4" />
+                    <TextBox x:Name="JpegQualityTextBox"
+                             Height="32"
+                             Width="120"
+                             HorizontalAlignment="Left"
+                             VerticalContentAlignment="Center"
+                             Margin="0,0,0,12" />
+
                     <TextBlock Text="默认保存目录" Margin="0,0,0,4" />
                     <Grid>
                         <Grid.ColumnDefinitions>
@@ -111,7 +128,26 @@
                     </Grid>
                 </StackPanel>
 
-                <!-- ⑤ GIF 录制 -->
+                <!-- ⑤ HDR 色调映射 -->
+                <TextBlock Text="HDR 色调映射" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <StackPanel Margin="4,0,0,20">
+                    <TextBlock Text="SDR 白点亮度（nits）" Margin="0,0,0,4" />
+                    <TextBox x:Name="HdrSdrWhiteTextBox"
+                             Height="32"
+                             Width="120"
+                             HorizontalAlignment="Left"
+                             VerticalContentAlignment="Center"
+                             Margin="0,0,0,10" />
+
+                    <TextBlock Text="HDR 峰值亮度（nits）" Margin="0,0,0,4" />
+                    <TextBox x:Name="HdrPeakTextBox"
+                             Height="32"
+                             Width="120"
+                             HorizontalAlignment="Left"
+                             VerticalContentAlignment="Center" />
+                </StackPanel>
+
+                <!-- ⑥ GIF 录制 -->
                 <TextBlock Text="GIF 录制" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
                 <StackPanel Margin="4,0,0,20">
                     <TextBlock Text="默认录制秒数" Margin="0,0,0,4" />
@@ -138,14 +174,21 @@
                              VerticalContentAlignment="Center" />
                 </StackPanel>
 
-                <!-- ⑥ 放大镜 -->
+                <!-- ⑦ 放大镜 -->
                 <TextBlock Text="取色" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
                 <StackPanel Margin="4,0,0,4">
                     <CheckBox x:Name="MagnifierCheck"
                                Content="截图时显示放大镜（取色器）" />
                 </StackPanel>
 
-                <!-- ⑦ 关于 -->
+                <!-- ⑧ 诊断 -->
+                <TextBlock Text="诊断" FontSize="16" FontWeight="SemiBold" Margin="0,16,0,8" />
+                <StackPanel Margin="4,0,0,4">
+                    <CheckBox x:Name="LoggingCheck"
+                              Content="启用诊断日志" />
+                </StackPanel>
+
+                <!-- ⑨ 关于 -->
                 <TextBlock Text="关于" FontSize="16" FontWeight="SemiBold" Margin="0,16,0,8" />
                 <StackPanel Margin="4,0,0,4">
                     <TextBlock Text="WinSnap" FontWeight="SemiBold" />

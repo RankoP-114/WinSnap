@@ -139,6 +139,18 @@ public class AnnotationTests
     }
 
     [Fact]
+    public void Document_AddSameIdTwice_Throws()
+    {
+        var doc = new AnnotationDocument();
+        var a = new RectangleAnnotation { Rect = new RectInt(0, 0, 5, 5) };
+        var b = new EllipseAnnotation { Id = a.Id, Rect = new RectInt(5, 5, 5, 5) };
+
+        doc.Add(a);
+
+        Assert.Throws<InvalidOperationException>(() => doc.Add(b));
+    }
+
+    [Fact]
     public void Document_HitTest_ReturnsTopmost()
     {
         var doc = new AnnotationDocument();

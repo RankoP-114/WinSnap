@@ -22,7 +22,22 @@ public sealed class AnnotationDocument
         ArgumentNullException.ThrowIfNull(element);
         if (_elements.Contains(element))
             throw new InvalidOperationException("该元素已在文档中。");
+        if (FindById(element.Id) is not null)
+            throw new InvalidOperationException("该元素 Id 已在文档中。");
         _elements.Add(element);
+    }
+
+    /// <summary>把元素插回指定插入顺序位置。越界索引会钳制到有效范围。</summary>
+    public void Insert(int index, AnnotationElement element)
+    {
+        ArgumentNullException.ThrowIfNull(element);
+        if (_elements.Contains(element))
+            throw new InvalidOperationException("该元素已在文档中。");
+        if (FindById(element.Id) is not null)
+            throw new InvalidOperationException("该元素 Id 已在文档中。");
+
+        int clamped = Math.Clamp(index, 0, _elements.Count);
+        _elements.Insert(clamped, element);
     }
 
     /// <summary>移除元素。成功返回 true。</summary>
@@ -30,6 +45,13 @@ public sealed class AnnotationDocument
     {
         ArgumentNullException.ThrowIfNull(element);
         return _elements.Remove(element);
+    }
+
+    /// <summary>返回元素当前插入顺序索引；不存在返回 -1。</summary>
+    public int IndexOf(AnnotationElement element)
+    {
+        ArgumentNullException.ThrowIfNull(element);
+        return _elements.IndexOf(element);
     }
 
     /// <summary>按 Id 查找。</summary>

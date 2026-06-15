@@ -1,3 +1,5 @@
+using WinSnap.Core.Imaging;
+
 namespace WinSnap.Core.Settings;
 
 /// <summary>
@@ -15,7 +17,6 @@ public sealed class AppSettings
     public string DefaultSaveFormat { get; set; } = "png"; // png | jpg
     public int JpegQuality { get; set; } = 90;
     public string? LastSaveDirectory { get; set; }
-    public bool QuickSaveWithoutDialog { get; set; }
 
     // ---- GIF 录制 ----
     public int GifDefaultDurationSeconds { get; set; } = 5;
@@ -23,16 +24,13 @@ public sealed class AppSettings
     public int GifFramesPerSecond { get; set; } = 10;
 
     // ---- 行为 ----
-    public bool StartMinimizedToTray { get; set; } = true;
     public bool RunAtStartup { get; set; }
     public bool ShowMagnifier { get; set; } = true;
+    public bool EnableLogging { get; set; } = true;
 
     // ---- HDR 色调映射（M4，对标 OBS 的 SDR White / HDR Peak）----
-    public double HdrSdrWhiteLevelNits { get; set; } = 420.0;
-    public double HdrPeakNits { get; set; } = 1000.0;
-
-    // ---- 界面语言 ----
-    public string Language { get; set; } = "zh-CN";
+    public double HdrSdrWhiteLevelNits { get; set; } = ToneMapper.DefaultSdrWhiteNits;
+    public double HdrPeakNits { get; set; } = ToneMapper.DefaultHdrPeakNits;
 
     // ---- 主题（M9，WinUI3 Fluent ThemeMode）----
     public string Theme { get; set; } = "system"; // system | light | dark

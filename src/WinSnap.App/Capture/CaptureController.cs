@@ -42,7 +42,10 @@ public sealed class CaptureController
         {
             Log.Information("开始截图：捕获虚拟桌面（GDI 路径）");
             var background = CaptureScreenBitmapSource();
-            _session = new CaptureSession(background);
+            _session = new CaptureSession(
+                background,
+                defaultSaveFormat: CurrentSaveFormat,
+                jpegQuality: CurrentJpegQuality);
             _session.PinRequested += OnPinRequested;
             _session.Closed += OnSessionClosed;
             _session.Start();
@@ -66,7 +69,11 @@ public sealed class CaptureController
         {
             Log.Information("开始长截图：先框选要滚动捕获的区域");
             var background = CaptureScreenBitmapSource();
-            _session = new CaptureSession(background, CaptureSession.SessionMode.LongCapture);
+            _session = new CaptureSession(
+                background,
+                CaptureSession.SessionMode.LongCapture,
+                CurrentSaveFormat,
+                CurrentJpegQuality);
             _session.LongCaptureConfirmed += OnLongCaptureConfirmed;
             _session.Closed += OnSessionClosed;
             _session.Start();
@@ -78,8 +85,33 @@ public sealed class CaptureController
         }
     }
 
-    public void StartGifCapture()
-        => StartGifCaptureCore(durationOverrideSeconds: null);
+    public void StartPinCapture()
+    {
+        if (_session is not null)
+        {
+            Log.Debug("已有会话进行中，忽略钉图触发");
+            return;
+        }
+
+        try
+        {
+            Log.Information("开始钉图：先框选要钉到屏幕的区域");
+            var background = CaptureScreenBitmapSource();
+            _session = new CaptureSession(
+                background,
+                CaptureSession.SessionMode.PinCapture,
+                CurrentSaveFormat,
+                CurrentJpegQuality);
+            _session.PinRequested += OnPinRequested;
+            _session.Closed += OnSessionClosed;
+            _session.Start();
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "钉图启动失败");
+            _session = null;
+        }
+    }
 
     public void StartGifCaptureWithDurationPrompt()
     {
@@ -109,7 +141,11 @@ public sealed class CaptureController
             Log.Information("开始 GIF 录制：先框选录制区域，时长={Duration}s FPS={Fps} 倒计时={Countdown}s",
                 options.DurationSeconds, options.FramesPerSecond, options.CountdownSeconds);
             var background = CaptureScreenBitmapSource();
-            _session = new CaptureSession(background, CaptureSession.SessionMode.GifCapture);
+            _session = new CaptureSession(
+                background,
+                CaptureSession.SessionMode.GifCapture,
+                CurrentSaveFormat,
+                CurrentJpegQuality);
             _session.GifCaptureConfirmed += (x, y, w, h, mode) =>
                 OnGifCaptureConfirmed(x, y, w, h, mode, options);
             _session.Closed += OnSessionClosed;
@@ -133,7 +169,7 @@ public sealed class CaptureController
         try
         {
             var service = new ScrollCaptureService();
-            var result = await service.CaptureAsync(x, y, w, h, autoScroll: true, CancellationToken.None);
+            var result = await service.CaptureAsync(x, y, w, h, CancellationToken.None);
             if (result is not null)
             {
                 // 把长图钉到屏幕，用户可右键复制/另存
@@ -229,11 +265,7 @@ public sealed class CaptureController
     }
 
     private static string BuildTempGifPath()
-    {
-        string dir = Path.Combine(Path.GetTempPath(), "WinSnap");
-        Directory.CreateDirectory(dir);
-        return Path.Combine(dir, ImageSaver.BuildDefaultFileName("gif"));
-    }
+        => TempFileCleaner.BuildTempPath("gif");
 
     /// <summary>按显示器 HDR 状态和前台全屏状态选择覆盖层背景。</summary>
     private BitmapSource CaptureScreenBitmapSource()
@@ -242,7 +274,7 @@ public sealed class CaptureController
         bool foregroundFullscreen = IsForegroundFullscreenLike();
         bool needsDuplicationFallback = false;
         double hdrSdrWhiteNits = Math.Clamp(
-            _settings.Current.HdrSdrWhiteLevelNits < 420.0 ? 420.0 : _settings.Current.HdrSdrWhiteLevelNits,
+            _settings.Current.HdrSdrWhiteLevelNits,
             80.0,
             1000.0);
         double hdrPeakNits = Math.Clamp(_settings.Current.HdrPeakNits, hdrSdrWhiteNits, 4000.0);
@@ -352,4 +384,12 @@ public sealed class CaptureController
     }
 
     public void CloseAllPins() => _pinManager.CloseAll();
+
+    private string CurrentSaveFormat
+        => string.Equals(_settings.Current.DefaultSaveFormat, "jpg", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(_settings.Current.DefaultSaveFormat, "jpeg", StringComparison.OrdinalIgnoreCase)
+            ? "jpg"
+            : "png";
+
+    private int CurrentJpegQuality => Math.Clamp(_settings.Current.JpegQuality, 1, 100);
 }

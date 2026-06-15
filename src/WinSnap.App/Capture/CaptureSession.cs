@@ -5,6 +5,7 @@ using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 using Serilog;
 using WinSnap.App.Annotation;
+using WinSnap.App.Diagnostics;
 using WinSnap.App.Imaging;
 using WinSnap.Core.Annotations;
 using WinSnap.Core.Commands;
@@ -21,7 +22,7 @@ namespace WinSnap.App.Capture;
 public sealed class CaptureSession
 {
     public enum DragMode { None, Creating, Moving, Resizing }
-    public enum SessionMode { Screenshot, LongCapture, GifCapture }
+    public enum SessionMode { Screenshot, PinCapture, LongCapture, GifCapture }
     public enum GifOutputMode { Copy, Save }
 
     public const double HandleSize = 12;
@@ -53,23 +54,36 @@ public sealed class CaptureSession
     private bool _revealed;
 
     private readonly SessionMode _sessionMode;
+    private readonly string _defaultSaveFormat;
+    private readonly int _jpegQuality;
 
-    public CaptureSession(CapturedImage captured, SessionMode sessionMode = SessionMode.Screenshot)
-        : this(ImagingHelper.ToBitmapSource(captured), sessionMode)
+    public CaptureSession(
+        CapturedImage captured,
+        SessionMode sessionMode = SessionMode.Screenshot,
+        string defaultSaveFormat = "png",
+        int jpegQuality = 90)
+        : this(ImagingHelper.ToBitmapSource(captured), sessionMode, defaultSaveFormat, jpegQuality)
     {
     }
 
-    public CaptureSession(BitmapSource background, SessionMode sessionMode = SessionMode.Screenshot)
+    public CaptureSession(
+        BitmapSource background,
+        SessionMode sessionMode = SessionMode.Screenshot,
+        string defaultSaveFormat = "png",
+        int jpegQuality = 90)
     {
         ArgumentNullException.ThrowIfNull(background);
         _background = background;
         _vs = VirtualScreenInfo.Get();
         _sessionMode = sessionMode;
+        _defaultSaveFormat = NormalizeSaveFormat(defaultSaveFormat);
+        _jpegQuality = Math.Clamp(jpegQuality, 1, 100);
     }
 
     public AnnotationDocument Document { get; } = new();
     public BitmapSource Background => _background;
     public VirtualScreenInfo VirtualScreen => _vs;
+    public bool IsPinCapture => _sessionMode == SessionMode.PinCapture;
     public bool IsGifCapture => _sessionMode == SessionMode.GifCapture;
     public bool IsSelectionOnlyMode => _sessionMode is SessionMode.LongCapture or SessionMode.GifCapture;
 
@@ -111,6 +125,7 @@ public sealed class CaptureSession
         {
             var window = new CaptureScreenWindow(this, m, _background);
             window.FirstFrameRendered += OnWindowFirstFrameRendered;
+            window.Closed += OnCaptureWindowClosed;
             _windows.Add(window);
         }
 
@@ -120,6 +135,9 @@ public sealed class CaptureSession
         RenderAll();
         Log.Information("截图会话开始：{Count} 个显示器", _windows.Count);
     }
+
+    private void OnCaptureWindowClosed(object? sender, EventArgs e)
+        => Cancel();
 
     private void OnWindowFirstFrameRendered(object? sender, EventArgs e)
     {
@@ -575,6 +593,11 @@ public sealed class CaptureSession
     public void DoCopy()
     {
         if (!HasSelection) { Cancel(); return; }
+        if (_sessionMode == SessionMode.PinCapture)
+        {
+            DoPin();
+            return;
+        }
         if (_sessionMode == SessionMode.LongCapture)
         {
             LongCaptureConfirmed?.Invoke(
@@ -594,7 +617,7 @@ public sealed class CaptureSession
             string? tempPath = null;
             try
             {
-                tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ImageSaver.BuildDefaultFileName("png"));
+                tempPath = TempFileCleaner.BuildTempPath("png");
                 ImageSaver.Save(final, tempPath);
             }
             catch { tempPath = null; }
@@ -620,14 +643,16 @@ public sealed class CaptureSession
         var dialog = new SaveFileDialog
         {
             Filter = "PNG 图片|*.png|JPEG 图片|*.jpg",
-            FileName = ImageSaver.BuildDefaultFileName("png"),
+            FileName = ImageSaver.BuildDefaultFileName(_defaultSaveFormat),
             AddExtension = true,
+            DefaultExt = "." + _defaultSaveFormat,
+            FilterIndex = _defaultSaveFormat == "jpg" ? 2 : 1,
         };
         if (dialog.ShowDialog() == true)
         {
             try
             {
-                ImageSaver.Save(RenderFinal(), dialog.FileName);
+                ImageSaver.Save(RenderFinal(), dialog.FileName, _jpegQuality);
                 Log.Information("已保存截图：{Path}", dialog.FileName);
             }
             catch (Exception ex)
@@ -660,13 +685,30 @@ public sealed class CaptureSession
         Cancel();
     }
 
+    private static string NormalizeSaveFormat(string? format)
+        => string.Equals(format, "jpg", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(format, "jpeg", StringComparison.OrdinalIgnoreCase)
+            ? "jpg"
+            : "png";
+
     public void Cancel()
     {
         if (_closed) return;
         _closed = true;
         var closedHandler = Closed;
         foreach (var w in _windows.ToArray())
-            w.Close();
+        {
+            w.FirstFrameRendered -= OnWindowFirstFrameRendered;
+            w.Closed -= OnCaptureWindowClosed;
+            try
+            {
+                w.Close();
+            }
+            catch (InvalidOperationException)
+            {
+                // Window may already be closing because the user/system closed it first.
+            }
+        }
         _windows.Clear();
         _topLevelWindows = Array.Empty<WindowEnumerator.WindowBounds>();
         _hoverWindow = null;

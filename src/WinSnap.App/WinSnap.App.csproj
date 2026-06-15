@@ -15,6 +15,10 @@
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
 
+  <PropertyGroup Condition="Exists('Assets\WinSnap.ico')">
+    <ApplicationIcon>Assets\WinSnap.ico</ApplicationIcon>
+  </PropertyGroup>
+
   <ItemGroup>
     <!-- WPF 与 WinForms 共存：移除 WinForms / System.Drawing 隐式 using，避免
          Application/MessageBox/Rectangle/Color/Point 等与 System.Windows.* 歧义；

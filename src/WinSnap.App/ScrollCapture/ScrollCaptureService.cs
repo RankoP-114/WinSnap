@@ -1,5 +1,6 @@
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using Serilog;
 using WinSnap.Core.Primitives;
 using WinSnap.Core.Stitching;
 using WinSnap.Interop;
@@ -10,12 +11,8 @@ namespace WinSnap.App.ScrollCapture;
 /// 长截图（滚动截图）服务：在给定的物理像素矩形内逐帧捕获，驱动（或等待）目标区域滚动，
 /// 用 <see cref="ScrollStitcher"/> 把各帧增量拼成一张长图，最终返回 WPF <see cref="BitmapSource"/>。
 ///
-/// 两种工作模式：
-/// - 自动（<c>autoScroll = true</c>）：每帧后用 <see cref="InputSimulator.ScrollVertical"/> 注入向下滚轮，
-///   等待一小段时间让目标重绘，再截下一帧；直到 <see cref="ScrollStitcher.IsAtBottom"/> 或触达上限。
-/// - 半自动（<c>autoScroll = false</c>）：服务截首帧后等待外部信号，由用户手动滚动后调用
-///   <see cref="AppendManualFrame"/> 触发下一帧；调用 <see cref="FinishManual"/> 结束。
-///
+/// 自动模式每帧后用 <see cref="InputSimulator.ScrollVertical"/> 注入向下滚轮，等待一小段时间让目标重绘，
+/// 再截下一帧；直到 <see cref="ScrollStitcher.IsAtBottom"/> 或触达上限。
 /// 线程：捕获/拼接为 CPU 工作，放在线程池执行；返回的 <see cref="BitmapSource"/> 已 Freeze，可跨线程使用。
 /// </summary>
 public sealed class ScrollCaptureService
@@ -32,10 +29,6 @@ public sealed class ScrollCaptureService
     /// <summary>自动模式下每帧之间的等待（毫秒），给目标留出重绘时间。</summary>
     public int AutoScrollDelayMs { get; init; } = 120;
 
-    // 半自动：每次外部调用 AppendManualFrame 都唤醒采集循环抓取下一帧。
-    private TaskCompletionSource<bool>? _manualSignal;
-    private readonly object _manualLock = new();
-
     /// <summary>
     /// 执行一次长截图。
     /// </summary>
@@ -43,12 +36,11 @@ public sealed class ScrollCaptureService
     /// <param name="regionY">目标矩形左上角 Y（虚拟桌面物理像素坐标）。</param>
     /// <param name="regionW">目标矩形宽（物理像素）。</param>
     /// <param name="regionH">目标矩形高（物理像素）。</param>
-    /// <param name="autoScroll">true=自动注入滚轮；false=半自动，等待 <see cref="AppendManualFrame"/>。</param>
     /// <param name="ct">取消令牌：取消时若已有 ≥1 帧则返回当前拼接结果，否则返回 null。</param>
     /// <returns>拼接好的长图（已 Freeze）；无任何有效帧时为 null。</returns>
     public async Task<BitmapSource?> CaptureAsync(
         int regionX, int regionY, int regionW, int regionH,
-        bool autoScroll, CancellationToken ct)
+        CancellationToken ct)
     {
         if (regionW <= 0 || regionH <= 0)
             return null;
@@ -58,9 +50,6 @@ public sealed class ScrollCaptureService
         int centerY = regionY + regionH / 2;
 
         var stitcher = new ScrollStitcher();
-
-        // 每步滚动后内容上移约一帧高度的一部分（保留足够竖直重叠供模板匹配）。
-        int scrollOverlap = Math.Max(1, regionH / 4);
 
         try
         {
@@ -72,32 +61,28 @@ public sealed class ScrollCaptureService
                 {
                     ct.ThrowIfCancellationRequested();
 
-                    // 自动模式下每帧重置光标到中心：避免用户/系统期间移走光标导致滚轮丢失目标。
-                    if (autoScroll)
-                        InputSimulator.MoveCursorTo(centerX, centerY);
+                    // 每帧重置光标到中心：避免用户/系统期间移走光标导致滚轮丢失目标。
+                    InputSimulator.MoveCursorTo(centerX, centerY);
 
                     var captured = GdiCapture.CaptureRegion(regionX, regionY, regionW, regionH);
                     var frame = ToPixelBuffer(captured);
                     stitcher.Append(frame);
 
+                    if (stitcher.LastMatchFailed)
+                    {
+                        Log.Warning(
+                            "长截图停止：第 {FrameIndex} 帧重叠匹配失败，平均 SAD={Sad:F2}",
+                            frameIndex + 1,
+                            stitcher.LastMatchAverageSadPerChannel);
+                        break;
+                    }
                     if (stitcher.IsAtBottom)
                         break;
                     if (stitcher.CurrentHeight >= MaxStitchedHeight)
                         break;
 
-                    if (autoScroll)
-                    {
-                        // delta<0 向下滚；幅度按重叠目标折算成滚轮刻度。
-                        InputSimulator.ScrollVertical(-WheelNotchesPerStep * InputSimulator.WheelDelta);
-                        await Task.Delay(AutoScrollDelayMs, ct).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        // 半自动：等待外部信号（用户已手动滚动并请求追加下一帧）。
-                        bool more = await WaitForManualSignalAsync(ct).ConfigureAwait(false);
-                        if (!more)
-                            break; // 外部调用 FinishManual：结束采集
-                    }
+                    InputSimulator.ScrollVertical(-WheelNotchesPerStep * InputSimulator.WheelDelta);
+                    await Task.Delay(AutoScrollDelayMs, ct).ConfigureAwait(false);
                 }
             }, ct).ConfigureAwait(false);
         }
@@ -105,61 +90,13 @@ public sealed class ScrollCaptureService
         {
             // 取消：已有内容则尽量返回，否则向上层返回 null。
         }
-        finally
-        {
-            CompleteManualSignal(false);
-        }
-
-        _ = scrollOverlap; // 重叠量由 ScrollStitcher 自行通过模板匹配确定，这里仅作语义说明。
-
         if (stitcher.CurrentHeight <= 0 || stitcher.Width <= 0)
             return null;
 
         return ToBitmapSource(stitcher.Build());
     }
 
-    /// <summary>
-    /// 半自动模式下由外部（如按下“下一帧”热键）调用：请求采集循环再抓取并拼接一帧。
-    /// 自动模式或当前无进行中的等待时调用无副作用。
-    /// </summary>
-    public void AppendManualFrame() => CompleteManualSignal(true);
-
-    /// <summary>
-    /// 半自动模式下由外部调用以结束采集（已到底或用户主动完成）。
-    /// 采集循环将退出并返回当前拼接结果。
-    /// </summary>
-    public void FinishManual() => CompleteManualSignal(false);
-
-    private Task<bool> WaitForManualSignalAsync(CancellationToken ct)
-    {
-        TaskCompletionSource<bool> tcs;
-        lock (_manualLock)
-        {
-            tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _manualSignal = tcs;
-        }
-
-        // 取消时让等待任务以取消收场（由 Task.Delay/外层 catch 统一处理）。
-        var reg = ct.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetCanceled(), tcs);
-        return AwaitAndUnregister(tcs, reg);
-
-        static async Task<bool> AwaitAndUnregister(TaskCompletionSource<bool> t, CancellationTokenRegistration r)
-        {
-            try { return await t.Task.ConfigureAwait(false); }
-            finally { r.Dispose(); }
-        }
-    }
-
-    private void CompleteManualSignal(bool more)
-    {
-        lock (_manualLock)
-        {
-            _manualSignal?.TrySetResult(more);
-            _manualSignal = null;
-        }
-    }
-
-    // ---- 转换辅助：与现有 ImagingHelper 风格一致，但自包含以满足“只新增不改现有文件”。----
+    // ---- 转换辅助：与现有 ImagingHelper 风格一致。----
 
     /// <summary>把 GDI 捕获的 BGRA 帧（top-down, stride=Width*4）包装为平台无关的 <see cref="PixelBuffer"/>。</summary>
     private static PixelBuffer ToPixelBuffer(CapturedImage img)

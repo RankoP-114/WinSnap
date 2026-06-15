@@ -5,6 +5,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Serilog;
+using Serilog.Events;
 using WinSnap.App.Capture;
 using WinSnap.App.Hotkeys;
 using WinSnap.App.Tray;
@@ -19,8 +20,11 @@ namespace WinSnap.App;
 public partial class App : Application
 {
     private const string MutexName = "WinSnap.SingleInstance.{B7E3F0A1-9C2D-4E55-8A6B-WINSNAP}";
+    private const string WakeEventName = "WinSnap.WakeFirstInstance.{B7E3F0A1-9C2D-4E55-8A6B-WINSNAP}";
 
     private Mutex? _singleInstanceMutex;
+    private EventWaitHandle? _wakeEvent;
+    private RegisteredWaitHandle? _wakeRegistration;
     private ServiceProvider? _services;
     private TrayService? _tray;
     private HotkeyManager? _hotkeys;
@@ -31,8 +35,11 @@ public partial class App : Application
         _singleInstanceMutex = new Mutex(initiallyOwned: true, MutexName, out var isNewInstance);
         if (!isNewInstance)
         {
-            MessageBox.Show("WinSnap 已在运行中。", "WinSnap",
-                MessageBoxButton.OK, MessageBoxImage.Information);
+            if (!SignalFirstInstance())
+            {
+                MessageBox.Show("WinSnap 已在运行中。", "WinSnap",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+            }
             _singleInstanceMutex.Dispose();
             _singleInstanceMutex = null;
             Shutdown();
@@ -40,26 +47,18 @@ public partial class App : Application
         }
 
         base.OnStartup(e);
+        _wakeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, WakeEventName);
 
         // ---- 配置 ----
         var settingsService = new SettingsService();
         settingsService.Load();
 
         // ---- 日志 ----
-        var appDataDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WinSnap");
-        var logDir = Path.Combine(appDataDir, "logs");
-        Directory.CreateDirectory(logDir);
-        Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Debug()
-            .WriteTo.File(
-                Path.Combine(logDir, "winsnap-.log"),
-                rollingInterval: RollingInterval.Day,
-                retainedFileCountLimit: 7,
-                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
-            .CreateLogger();
+        ConfigureLogging(settingsService.Current.EnableLogging);
 
         Log.Information("WinSnap 启动，配置文件：{Path}", settingsService.FilePath);
+        if (settingsService.LastLoadError is not null)
+            Log.Warning(settingsService.LastLoadError, "配置文件读取失败，已回退默认设置");
 
         // ---- 全局异常处理 ----
         DispatcherUnhandledException += OnDispatcherUnhandledException;
@@ -83,18 +82,23 @@ public partial class App : Application
         _tray = _services.GetRequiredService<TrayService>();
         _tray.CaptureRequested += capture.StartCapture;
         _tray.LongCaptureRequested += capture.StartLongCapture;
+        _tray.GifCaptureRequested += capture.StartGifCaptureWithDurationPrompt;
+        _tray.CloseAllPinsRequested += capture.CloseAllPins;
         _tray.SettingsRequested += OnSettingsRequested;
         _tray.Initialize();
+        StartWakeListener();
 
         // ---- 全局热键 ----
         _hotkeys = _services.GetRequiredService<HotkeyManager>();
         _hotkeys.CaptureTriggered += capture.StartCapture;
-        bool hotkeyRegistered = _hotkeys.Initialize(settingsService.Current.CaptureHotkey);
+        _hotkeys.PinTriggered += capture.StartPinCapture;
+        _hotkeys.ScrollCaptureTriggered += capture.StartLongCapture;
+        bool hotkeyRegistered = _hotkeys.Initialize(settingsService.Current);
         if (!hotkeyRegistered)
         {
-            _tray.ShowMessage("截图热键被占用",
-                $"热键 {settingsService.Current.CaptureHotkey} 注册失败，可能被其它程序（如 QQ）占用。" +
-                "可从托盘菜单截图，或稍后在设置中更换热键。");
+            _tray.ShowMessage("全局热键注册失败",
+                "截图 / 钉图 / 长截图热键中至少有一个注册失败，可能被其它程序占用。" +
+                "可从托盘菜单使用功能，或稍后在设置中更换热键。");
         }
 
         // 冒烟自检（环境变量门控，不影响正常运行）
@@ -116,7 +120,7 @@ public partial class App : Application
             {
                 var img = WinSnap.Interop.GdiCapture.CaptureVirtualScreen();
                 var bmp = WinSnap.App.Imaging.ImagingHelper.ToBitmapSource(img);
-                var path = Path.Combine(Path.GetTempPath(), "winsnap_selftest.png");
+                var path = Path.Combine(Path.GetTempPath(), "Screenshot_selftest.png");
                 using (var fs = File.Create(path))
                 {
                     var enc = new PngBitmapEncoder();
@@ -152,8 +156,73 @@ public partial class App : Application
     {
         var settings = _services!.GetRequiredService<SettingsService>();
         var window = new WinSnap.App.Settings.SettingsWindow(settings);
-        window.CaptureHotkeyChanged += hk => _hotkeys?.RegisterCaptureHotkey(hk);
+        window.HotkeysChanged += (captureHotkey, pinHotkey, scrollHotkey) =>
+        {
+            bool registered = _hotkeys?.RegisterConfiguredHotkeys(captureHotkey, pinHotkey, scrollHotkey) == true;
+            if (!registered)
+            {
+                _tray?.ShowMessage("全局热键注册失败",
+                    "截图 / 钉图 / 长截图热键中至少有一个注册失败，原热键已保留。");
+            }
+            return registered;
+        };
+        window.Saved += (_, _) => ConfigureLogging(settings.Current.EnableLogging);
         window.ShowDialog();
+    }
+
+    private void StartWakeListener()
+    {
+        if (_wakeEvent is null)
+            return;
+
+        _wakeRegistration = ThreadPool.RegisterWaitForSingleObject(
+            _wakeEvent,
+            (_, _) => Dispatcher.BeginInvoke(() =>
+            {
+                _tray?.ShowMessage("WinSnap", "已在后台运行，可从托盘菜单使用。");
+            }),
+            state: null,
+            millisecondsTimeOutInterval: Timeout.Infinite,
+            executeOnlyOnce: false);
+    }
+
+    private static bool SignalFirstInstance()
+    {
+        try
+        {
+            using var wakeEvent = EventWaitHandle.OpenExisting(WakeEventName);
+            return wakeEvent.Set();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void ConfigureLogging(bool enableLogging)
+    {
+        Log.CloseAndFlush();
+        Log.Logger = CreateLogger(enableLogging);
+    }
+
+    private static ILogger CreateLogger(bool enableLogging)
+    {
+        if (!enableLogging)
+            return new LoggerConfiguration().CreateLogger();
+
+        var appDataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WinSnap");
+        var logDir = Path.Combine(appDataDir, "logs");
+        Directory.CreateDirectory(logDir);
+
+        return new LoggerConfiguration()
+            .MinimumLevel.Is(LogEventLevel.Debug)
+            .WriteTo.File(
+                Path.Combine(logDir, "winsnap-.log"),
+                rollingInterval: RollingInterval.Day,
+                retainedFileCountLimit: 7,
+                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+            .CreateLogger();
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
@@ -165,6 +234,10 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         Log.Information("WinSnap 退出");
+        _wakeRegistration?.Unregister(null);
+        _wakeRegistration = null;
+        _wakeEvent?.Dispose();
+        _wakeEvent = null;
         _hotkeys?.Dispose();
         _tray?.Dispose();
         _services?.Dispose();

@@ -37,11 +37,10 @@ public static class MemoryTrimmer
             long beforePrivate = GC.GetTotalMemory(forceFullCollection: false);
 
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false, compacting: false);
 
-            EmptyWorkingSet(Process.GetCurrentProcess().Handle);
+            using var process = Process.GetCurrentProcess();
+            EmptyWorkingSet(process.Handle);
 
             long afterPrivate = GC.GetTotalMemory(forceFullCollection: false);
             Log.Debug("截图会话后内存清理：托管堆 {Before:N0} -> {After:N0}", beforePrivate, afterPrivate);

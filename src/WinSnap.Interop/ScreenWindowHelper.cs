@@ -6,13 +6,6 @@ namespace WinSnap.Interop;
 /// </summary>
 public static class ScreenWindowHelper
 {
-    /// <summary>把窗口精确覆盖整个虚拟桌面（物理像素），置顶且不抢焦点。</summary>
-    public static void CoverVirtualScreen(IntPtr hwnd)
-    {
-        var vs = VirtualScreenInfo.Get();
-        PositionTopmost(hwnd, vs.X, vs.Y, vs.Width, vs.Height);
-    }
-
     /// <summary>把窗口精确定位/铺满指定物理像素矩形（用于按显示器覆盖），置顶且不抢焦点。</summary>
     public static void PositionTopmost(IntPtr hwnd, int x, int y, int width, int height)
     {

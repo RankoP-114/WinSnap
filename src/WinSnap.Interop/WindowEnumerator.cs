@@ -14,27 +14,6 @@ public static class WindowEnumerator
     /// <summary>一个顶层窗口的句柄与物理像素边界。</summary>
     public readonly record struct WindowBounds(IntPtr Handle, int X, int Y, int Width, int Height);
 
-    /// <summary>
-    /// 命中给定屏幕点（物理像素）的顶层根窗口及其精确边界；无命中返回 null。
-    /// 流程：WindowFromPoint → GetAncestor(GA_ROOT) → DWM 扩展边界（回退 GetWindowRect）。
-    /// </summary>
-    public static WindowBounds? WindowFromScreenPoint(int x, int y)
-    {
-        var pt = new POINT { X = x, Y = y };
-        IntPtr hwnd = WindowFromPoint(pt);
-        if (hwnd == IntPtr.Zero)
-            return null;
-
-        IntPtr root = GetAncestor(hwnd, GA_ROOT);
-        if (root == IntPtr.Zero)
-            root = hwnd;
-
-        if (!TryGetBounds(root, out RECT rect))
-            return null;
-
-        return ToBounds(root, rect);
-    }
-
     /// <summary>尝试取得当前前台根窗口的物理像素边界。</summary>
     public static bool TryGetForegroundWindowBounds(out WindowBounds bounds)
     {
@@ -47,6 +26,8 @@ public static class WindowEnumerator
         IntPtr root = GetAncestor(hwnd, GA_ROOT);
         if (root == IntPtr.Zero)
             root = hwnd;
+        if (!IsWindowVisible(root) || IsIconic(root))
+            return false;
 
         if (!TryGetBounds(root, out RECT rect))
             return false;
@@ -163,13 +144,6 @@ public static class WindowEnumerator
     // ---------------------------------------------------------------------
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     private struct RECT
     {
         public int Left;
@@ -191,9 +165,6 @@ public static class WindowEnumerator
     // ---------------------------------------------------------------------
     // P/Invoke（本类私有，避免与 NativeMethods.cs 冲突）
     // ---------------------------------------------------------------------
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr WindowFromPoint(POINT point);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
