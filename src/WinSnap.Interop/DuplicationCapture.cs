@@ -49,12 +49,6 @@ public static class DuplicationCapture
     /// <summary>整块屏获取有效帧的总时间预算（毫秒），超时即放弃该屏。</summary>
     private const int AcquireTotalBudgetMs = 1500;
 
-    [ThreadStatic]
-    private static IReadOnlyList<string>? _lastDiagnostics;
-
-    /// <summary>当前线程最近一次捕获的诊断日志（捕获过程中各屏的降级原因）；调用方可选读。</summary>
-    public static IReadOnlyList<string> LastDiagnostics => _lastDiagnostics ?? Array.Empty<string>();
-
     /// <summary>
     /// 抓取整个虚拟桌面，对 HDR 屏做 scRGB→SDR tone map，对 SDR 屏近似原样还原。
     /// 返回尺寸/原点 == <see cref="VirtualScreenInfo.Get"/> 的虚拟桌面，top-down BGRA8。
@@ -74,8 +68,7 @@ public static class DuplicationCapture
 
         if (canvasW == 0 || canvasH == 0)
         {
-            SetLastDiagnostics(diag);
-            return new CapturedImage(canvasW, canvasH, Array.Empty<byte>());
+            return CreateCapturedImage(canvasW, canvasH, Array.Empty<byte>(), diag);
         }
 
         // 目标画布：先用 GDI 抓整个虚拟桌面作基底，而非初始全黑——这是杜绝「HDR 截图全屏黑」的关键。
@@ -102,12 +95,10 @@ public static class DuplicationCapture
                     diag, adapterIndex, outputIndex));
         if (!enumerated)
         {
-            SetLastDiagnostics(diag);
-            return new CapturedImage(canvasW, canvasH, canvas);
+            return CreateCapturedImage(canvasW, canvasH, canvas, diag);
         }
 
-        SetLastDiagnostics(diag);
-        return new CapturedImage(canvasW, canvasH, canvas);
+        return CreateCapturedImage(canvasW, canvasH, canvas, diag);
     }
 
     /// <summary>
@@ -151,12 +142,10 @@ public static class DuplicationCapture
                     diag, adapterIndex, outputIndex));
         if (!enumerated)
         {
-            SetLastDiagnostics(diag);
-            return new CapturedImage(width, height, canvas);
+            return CreateCapturedImage(width, height, canvas, diag);
         }
 
-        SetLastDiagnostics(diag);
-        return new CapturedImage(width, height, canvas);
+        return CreateCapturedImage(width, height, canvas, diag);
     }
 
     /// <summary>
@@ -310,8 +299,18 @@ public static class DuplicationCapture
             diagnostics);
     }
 
-    private static void SetLastDiagnostics(List<string> diagnostics)
-        => _lastDiagnostics = diagnostics.Count == 0 ? Array.Empty<string>() : diagnostics.ToArray();
+    private static CapturedImage CreateCapturedImage(
+        int width,
+        int height,
+        byte[] pixelsBgra,
+        List<string> diagnostics)
+    {
+        var snapshot = SnapshotDiagnostics(diagnostics);
+        return new CapturedImage(width, height, pixelsBgra, snapshot);
+    }
+
+    private static IReadOnlyList<string> SnapshotDiagnostics(List<string> diagnostics)
+        => diagnostics.Count == 0 ? Array.Empty<string>() : diagnostics.ToArray();
 
     private delegate void OutputCaptureHandler(
         ID3D11Device device,
@@ -835,8 +834,7 @@ public static class DuplicationCapture
                 }
             }
 
-            SetLastDiagnostics(diag);
-            return new CapturedImage(_width, _height, canvas);
+            return CreateCapturedImage(_width, _height, canvas, diag);
         }
 
         public void Dispose()

@@ -28,6 +28,7 @@ public static class ClipboardHelper
     private const uint GMEM_MOVEABLE = 0x0002;
     private const uint GMEM_ZEROINIT = 0x0040;
     private const uint GHND = GMEM_MOVEABLE | GMEM_ZEROINIT;
+    private const int DibV5HeaderSize = 124;
 
     public delegate void CopyBgraRow(int sourceRow, IntPtr destination, int destinationStride);
 
@@ -177,10 +178,9 @@ public static class ClipboardHelper
 
     private static unsafe void SetDibV5Format(int width, int height, CopyBgraRow copyRow)
     {
-        const int headerSize = 124;
         int stride = checked(width * 4);
         int pixelBytes = checked(stride * height);
-        int totalBytes = checked(headerSize + pixelBytes);
+        int totalBytes = checked(DibV5HeaderSize + pixelBytes);
 
         IntPtr hGlobal = GlobalAlloc(GHND, (UIntPtr)totalBytes);
         if (hGlobal == IntPtr.Zero)
@@ -195,15 +195,7 @@ public static class ClipboardHelper
             try
             {
                 var destination = new Span<byte>((void*)ptr, totalBytes);
-                WriteDibV5Header(destination[..headerSize], width, height, pixelBytes);
-                byte* dstBase = (byte*)ptr + headerSize;
-                for (int y = 0; y < height; y++)
-                {
-                    byte* dstRow = dstBase + (y * stride);
-                    copyRow(height - 1 - y, (IntPtr)dstRow, stride);
-                    for (int a = 3; a < stride; a += 4)
-                        dstRow[a] = 0xFF;
-                }
+                WriteDibV5(destination, width, height, copyRow);
             }
             finally
             {
@@ -217,6 +209,32 @@ public static class ClipboardHelper
         {
             if (!ownershipTransferred)
                 GlobalFree(hGlobal);
+        }
+    }
+
+    internal static unsafe void WriteDibV5(Span<byte> destination, int width, int height, CopyBgraRow copyRow)
+    {
+        ArgumentNullException.ThrowIfNull(copyRow);
+        if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+
+        int stride = checked(width * 4);
+        int pixelBytes = checked(stride * height);
+        int totalBytes = checked(DibV5HeaderSize + pixelBytes);
+        if (destination.Length < totalBytes)
+            throw new ArgumentException("目标 DIBV5 缓冲区太小。", nameof(destination));
+
+        WriteDibV5Header(destination[..DibV5HeaderSize], width, height, pixelBytes);
+        fixed (byte* destinationBase = destination)
+        {
+            byte* dstBase = destinationBase + DibV5HeaderSize;
+            for (int y = 0; y < height; y++)
+            {
+                byte* dstRow = dstBase + (y * stride);
+                copyRow(height - 1 - y, (IntPtr)dstRow, stride);
+                for (int a = 3; a < stride; a += 4)
+                    dstRow[a] = 0xFF;
+            }
         }
     }
 

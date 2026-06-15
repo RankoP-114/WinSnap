@@ -12,7 +12,19 @@ namespace WinSnap.App.Pin;
 public sealed class PinManager
 {
     private const int DefaultMaxPinnedWindows = 20;
-    private readonly List<PinWindow> _windows = new();
+    private readonly List<IPinWindowHandle> _windows = new();
+    private readonly Func<BitmapSource, CapturedImage?, int, int, IPinWindowHandle> _createWindow;
+
+    public PinManager()
+        : this(static (image, captured, physicalX, physicalY) =>
+            new PinWindowHandle(new PinWindow(image, captured, physicalX, physicalY)))
+    {
+    }
+
+    internal PinManager(Func<BitmapSource, CapturedImage?, int, int, IPinWindowHandle> createWindow)
+    {
+        _createWindow = createWindow ?? throw new ArgumentNullException(nameof(createWindow));
+    }
 
     /// <summary>钉图软上限；小于等于 0 表示不限制。超过时自动关闭最早的钉图。</summary>
     public int MaxPinnedWindows { get; init; } = DefaultMaxPinnedWindows;
@@ -30,10 +42,22 @@ public sealed class PinManager
     /// <returns>新建的钉图窗口。</returns>
     public PinWindow Pin(BitmapSource image, CapturedImage? captured, int physicalX, int physicalY)
     {
+        var handle = PinCore(image, captured, physicalX, physicalY);
+        if (handle is PinWindowHandle pinWindowHandle)
+            return pinWindowHandle.Window;
+
+        throw new InvalidOperationException("测试窗口工厂不能用于生产 Pin 调用。");
+    }
+
+    internal void PinForTesting(BitmapSource image, CapturedImage? captured, int physicalX, int physicalY)
+        => PinCore(image, captured, physicalX, physicalY);
+
+    private IPinWindowHandle PinCore(BitmapSource image, CapturedImage? captured, int physicalX, int physicalY)
+    {
         ArgumentNullException.ThrowIfNull(image);
 
         TrimToCapacityForNewPin();
-        var window = new PinWindow(image, captured, physicalX, physicalY);
+        var window = _createWindow(image, captured, physicalX, physicalY);
         window.PinClosed += OnPinClosed;
         _windows.Add(window);
         window.Show();
@@ -51,7 +75,7 @@ public sealed class PinManager
 
     private void OnPinClosed(object? sender, EventArgs e)
     {
-        if (sender is PinWindow window)
+        if (sender is IPinWindowHandle window)
         {
             window.PinClosed -= OnPinClosed;
             _windows.Remove(window);
@@ -70,5 +94,34 @@ public sealed class PinManager
             _windows.RemoveAt(0);
             oldest.Close();
         }
+    }
+
+    internal interface IPinWindowHandle
+    {
+        event EventHandler? PinClosed;
+
+        void Show();
+
+        void Close();
+    }
+
+    private sealed class PinWindowHandle : IPinWindowHandle
+    {
+        public PinWindowHandle(PinWindow window)
+        {
+            Window = window;
+            Window.PinClosed += OnWindowPinClosed;
+        }
+
+        public PinWindow Window { get; }
+
+        public event EventHandler? PinClosed;
+
+        public void Show() => Window.Show();
+
+        public void Close() => Window.Close();
+
+        private void OnWindowPinClosed(object? sender, EventArgs e)
+            => PinClosed?.Invoke(this, e);
     }
 }

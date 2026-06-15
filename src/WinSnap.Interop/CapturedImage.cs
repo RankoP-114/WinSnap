@@ -10,13 +10,15 @@ public sealed class CapturedImage
     public int Width { get; }
     public int Height { get; }
     public byte[] PixelsBgra { get; }
+    public IReadOnlyList<string> Diagnostics { get; }
     public int Stride => Width * 4;
 
-    public CapturedImage(int width, int height, byte[] pixelsBgra)
+    public CapturedImage(int width, int height, byte[] pixelsBgra, IReadOnlyList<string>? diagnostics = null)
     {
         Width = width;
         Height = height;
         PixelsBgra = pixelsBgra;
+        Diagnostics = diagnostics is null ? Array.Empty<string>() : diagnostics.ToArray();
     }
 
     /// <summary>

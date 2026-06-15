@@ -338,7 +338,7 @@ public sealed class CaptureController
                 captureSdrWithDesktopDuplication: !hasHdr,
                 hdrSdrWhiteNits: hdrSdrWhiteNits,
                 hdrPeakNits: hdrPeakNits);
-            var diagnostics = DuplicationCapture.LastDiagnostics;
+            var diagnostics = hdr.Diagnostics;
             foreach (var line in diagnostics)
                 Log.Information("HDR 捕获诊断：{Diag}", line);
 

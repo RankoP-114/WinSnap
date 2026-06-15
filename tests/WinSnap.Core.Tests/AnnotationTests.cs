@@ -224,4 +224,36 @@ public class AnnotationTests
         Assert.NotEqual(int.MinValue, bottom.ZIndex);
         Assert.Equal(new AnnotationElement[] { top, bottom }, doc.InZOrder().ToArray());
     }
+
+    [Fact]
+    public void TextAnnotation_CjkBoundsUseWideCharacterWidth()
+    {
+        var text = new TextAnnotation
+        {
+            Position = new PointInt(10, 20),
+            FontSize = 20,
+            Text = "测试",
+        };
+
+        var bounds = text.GetBounds();
+
+        Assert.Equal(40, bounds.Width);
+        Assert.True(text.HitTest(new PointInt(49, 30), tolerance: 0));
+    }
+
+    [Fact]
+    public void TextAnnotation_AsciiBoundsUseNarrowCharacterWidth()
+    {
+        var text = new TextAnnotation
+        {
+            Position = new PointInt(10, 20),
+            FontSize = 20,
+            Text = "aa",
+        };
+
+        var bounds = text.GetBounds();
+
+        Assert.Equal(24, bounds.Width);
+        Assert.False(text.HitTest(new PointInt(49, 30), tolerance: 0));
+    }
 }

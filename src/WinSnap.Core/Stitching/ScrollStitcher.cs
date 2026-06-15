@@ -221,6 +221,7 @@ public sealed class ScrollStitcher : IDisposable
         {
             bestSad = long.MaxValue;
             bestRow = 0;
+            SeedBestMatchFromCoarsePass(last, tStart, frame.Bgra, h, stride, searchMax, ref bestSad, ref bestRow);
 
             for (int m = 0; m <= searchMax; m++)
             {
@@ -246,6 +247,45 @@ public sealed class ScrollStitcher : IDisposable
         newRows = frame.Height - firstNewRow;
         if (newRows < 0) newRows = 0;
         return averageSadPerChannel <= MaxAverageSadPerChannel;
+    }
+
+    /// <summary>
+    /// 粗扫一小部分候选行，给后续完整 SAD 搜索提供较低的初始 bestSad。
+    /// 完整搜索仍会遍历所有候选，所以该步骤只影响速度，不改变匹配结果。
+    /// </summary>
+    private void SeedBestMatchFromCoarsePass(
+        byte[] last,
+        int tStart,
+        byte[] cand,
+        int h,
+        int stride,
+        int searchMax,
+        ref long bestSad,
+        ref int bestRow)
+    {
+        if (searchMax < 64)
+            return;
+
+        int step = Math.Clamp(searchMax / 32, 4, 32);
+        for (int m = searchMax; m >= 0; m -= step)
+        {
+            long sad = ComputeSad(last, tStart, cand, m, h, stride, bestSad);
+            if (sad < bestSad || (sad == bestSad && m > bestRow))
+            {
+                bestSad = sad;
+                bestRow = m;
+            }
+        }
+
+        if (bestRow != 0)
+        {
+            long sad = ComputeSad(last, tStart, cand, 0, h, stride, bestSad);
+            if (sad < bestSad)
+            {
+                bestSad = sad;
+                bestRow = 0;
+            }
+        }
     }
 
     private bool TryFindExactSampleMatch(

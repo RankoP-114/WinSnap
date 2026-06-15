@@ -156,6 +156,23 @@ public class ScrollStitcherTests
     }
 
     [Fact]
+    public void Stitch_CoarseSeededSearch_KeepsCorrectOffsetWhenExactMatchFails()
+    {
+        var img = MakeLongImage(320);
+        var stitcher = new ScrollStitcher(templateHeight: 80);
+        var second = Slice(img, 70, 200);
+        second.SetPixel(0, 50, new ColorRgba(0, 0, 0, 255));
+
+        stitcher.Append(Slice(img, 0, 200));
+        stitcher.Append(second);
+
+        Assert.False(stitcher.LastMatchFailed);
+        Assert.Equal(70, stitcher.LastAppendedHeight);
+        Assert.Equal(270, stitcher.CurrentHeight);
+        AssertImagesEqual(Slice(img, 0, 270), stitcher.Build());
+    }
+
+    [Fact]
     public void Stitch_TemplateHeightAboveByteRange_ReconstructsFullImage()
     {
         const int totalHeight = 760;
