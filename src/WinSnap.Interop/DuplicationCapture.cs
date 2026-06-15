@@ -1337,6 +1337,10 @@ public static class DuplicationCapture
             throw new InvalidOperationException($"HDR 帧过大，无法展开为 SDR 缓冲：{w}x{h}。");
 
         var dst = new byte[(int)byteCount];
+        var mapping = ToneMapper.CreateMappingParameters(
+            sdrWhiteNits,
+            hdrPeakNits,
+            inputIsRec2020);
         byte* basePtr = (byte*)dataPtr;
         for (int y = 0; y < h; y++)
         {
@@ -1351,9 +1355,7 @@ public static class DuplicationCapture
                     (float)BitConverter.UInt16BitsToHalf(row[sp + 1]),
                     (float)BitConverter.UInt16BitsToHalf(row[sp + 2]),
                     (float)BitConverter.UInt16BitsToHalf(row[sp + 3]),
-                    sdrWhiteNits,
-                    hdrPeakNits,
-                    inputIsRec2020);
+                    mapping);
 
                 dst[dp] = b;
                 dst[dp + 1] = g;
@@ -1371,35 +1373,21 @@ public static class DuplicationCapture
     /// </summary>
     private static unsafe byte[] ReadBgra8(IntPtr dataPtr, int rowPitch, int w, int h)
     {
-        var dst = new byte[(long)w * h * 4];
-        byte* basePtr = (byte*)dataPtr;
-        int rowBytes = w * 4;
-        for (int y = 0; y < h; y++)
-        {
-            Marshal.Copy((IntPtr)(basePtr + (long)y * rowPitch), dst, y * rowBytes, rowBytes);
-        }
-        for (long i = 3; i < dst.LongLength; i += 4) dst[i] = 255; // 不透明
+        int byteCount = checked(w * h * 4);
+        var dst = new byte[byteCount];
+        int sourceBytes = h == 0 ? 0 : checked(((h - 1) * rowPitch) + (w * 4));
+        var source = new ReadOnlySpan<byte>((void*)dataPtr, sourceBytes);
+        BgraBufferConverter.CopyBgra8ToOpaqueBgra(source, rowPitch, dst, w, h);
         return dst;
     }
 
     private static unsafe byte[] ReadRgba8AsBgra(IntPtr dataPtr, int rowPitch, int w, int h)
     {
-        var dst = new byte[(long)w * h * 4];
-        byte* basePtr = (byte*)dataPtr;
-        for (int y = 0; y < h; y++)
-        {
-            byte* row = basePtr + (long)y * rowPitch;
-            int dstRow = y * w * 4;
-            for (int x = 0; x < w; x++)
-            {
-                int sp = x * 4;
-                int dp = dstRow + sp;
-                dst[dp + 0] = row[sp + 2]; // B
-                dst[dp + 1] = row[sp + 1]; // G
-                dst[dp + 2] = row[sp + 0]; // R
-                dst[dp + 3] = 255;
-            }
-        }
+        int byteCount = checked(w * h * 4);
+        var dst = new byte[byteCount];
+        int sourceBytes = h == 0 ? 0 : checked(((h - 1) * rowPitch) + (w * 4));
+        var source = new ReadOnlySpan<byte>((void*)dataPtr, sourceBytes);
+        BgraBufferConverter.CopyRgba8ToOpaqueBgra(source, rowPitch, dst, w, h);
         return dst;
     }
 

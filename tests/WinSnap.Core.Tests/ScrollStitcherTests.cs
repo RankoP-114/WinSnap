@@ -127,6 +127,21 @@ public class ScrollStitcherTests
     }
 
     [Fact]
+    public void Dispose_ClearsStateAndReleasesBuffers()
+    {
+        var img = MakeLongImage(100);
+        var stitcher = new ScrollStitcher();
+        stitcher.Append(Slice(img, 0, 100));
+
+        stitcher.Dispose();
+
+        Assert.Equal(0, stitcher.CurrentHeight);
+        Assert.Equal(0, stitcher.Width);
+        Assert.Equal(0, stitcher.FrameCount);
+        Assert.Equal(0, stitcher.Build().Height);
+    }
+
+    [Fact]
     public void Stitch_KnownOffset_AppendsExactNewRows()
     {
         // 长图 200 行；两帧各 120 行，第二帧相对第一帧下移 50 行。
@@ -138,6 +153,31 @@ public class ScrollStitcherTests
         Assert.Equal(170, stitcher.CurrentHeight);
         Assert.Equal(50, stitcher.LastAppendedHeight);
         AssertImagesEqual(Slice(img, 0, 170), stitcher.Build());
+    }
+
+    [Fact]
+    public void Stitch_TemplateHeightAboveByteRange_ReconstructsFullImage()
+    {
+        const int totalHeight = 760;
+        const int frameHeight = 360;
+        const int step = 80; // 重叠 280 行，足以容纳 260 行模板
+
+        var longImg = MakeLongImage(totalHeight, seed: 2468);
+        var stitcher = new ScrollStitcher(templateHeight: 260);
+
+        int start = 0;
+        int lastStart = totalHeight - frameHeight;
+        while (true)
+        {
+            int s = Math.Min(start, lastStart);
+            stitcher.Append(Slice(longImg, s, frameHeight));
+            if (s >= lastStart) break;
+            start += step;
+        }
+
+        var result = stitcher.Build();
+        Assert.Equal(totalHeight, result.Height);
+        AssertImagesEqual(longImg, result);
     }
 
     [Fact]

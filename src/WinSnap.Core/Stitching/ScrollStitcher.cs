@@ -1,3 +1,4 @@
+using System.Buffers;
 using WinSnap.Core.Primitives;
 
 namespace WinSnap.Core.Stitching;
@@ -16,7 +17,7 @@ namespace WinSnap.Core.Stitching;
 /// 模板取自上一帧底部（正文区），因此页面顶部固定 header（每帧相同的前若干行）
 /// 不会污染匹配，竖直位移 dy 仍正确。
 /// </summary>
-public sealed class ScrollStitcher
+public sealed class ScrollStitcher : IDisposable
 {
     /// <summary>模板条带高度（像素）。</summary>
     public int TemplateHeight { get; }
@@ -34,10 +35,12 @@ public sealed class ScrollStitcher
     public double MaxAverageSadPerChannel { get; }
 
     private byte[]? _bgra;      // 结果像素（BGRA，top-down，stride=_width*4）
+    private bool _bgraFromPool;
     private int _width;
     private int _height;        // 当前结果高度
     private int _capacityHeight;
     private byte[]? _lastFrame; // 上一帧像素
+    private bool _lastFrameFromPool;
     private int _lastFrameHeight;
 
     /// <summary>当前已拼接结果的高度（像素）。</summary>
@@ -99,9 +102,10 @@ public sealed class ScrollStitcher
             // 首帧：整幅作为基底
             _width = frame.Width;
             _height = frame.Height;
-            _capacityHeight = frame.Height;
-            _bgra = RetainFrame(frame, ownsFrame);
-            _lastFrame = ownsFrame ? _bgra : (byte[])frame.Bgra.Clone();
+            _bgra = RetainFrame(frame, ownsFrame, out _bgraFromPool);
+            _capacityHeight = Math.Max(frame.Height, _bgra.Length / frame.Stride);
+            _lastFrame = _bgra;
+            _lastFrameFromPool = _bgraFromPool;
             _lastFrameHeight = frame.Height;
             FrameCount = 1;
             LastAppendedHeight = frame.Height;
@@ -125,8 +129,7 @@ public sealed class ScrollStitcher
             LastMatchFailed = true;
             LastMatchAverageSadPerChannel = averageSad;
             IsAtBottom = false;
-            _lastFrame = RetainFrame(frame, ownsFrame);
-            _lastFrameHeight = frame.Height;
+            ReplaceLastFrame(frame, ownsFrame);
             return;
         }
 
@@ -139,18 +142,16 @@ public sealed class ScrollStitcher
             LastAppendedHeight = Math.Max(0, newRows);
             IsAtBottom = true;
             // 仍更新 lastFrame，便于后续（通常不会再追加）
-            _lastFrame = RetainFrame(frame, ownsFrame);
-            _lastFrameHeight = frame.Height;
             if (newRows > 0)
                 AppendBottomRows(frame, frame.Height - newRows, newRows);
+            ReplaceLastFrame(frame, ownsFrame);
             return;
         }
 
         AppendBottomRows(frame, frame.Height - newRows, newRows);
         LastAppendedHeight = newRows;
         IsAtBottom = false;
-        _lastFrame = RetainFrame(frame, ownsFrame);
-        _lastFrameHeight = frame.Height;
+        ReplaceLastFrame(frame, ownsFrame);
     }
 
     /// <summary>构建并返回当前拼接结果的快照（深拷贝）。无任何帧时返回 0x0 缓冲。</summary>
@@ -174,8 +175,11 @@ public sealed class ScrollStitcher
     /// <summary>重置到初始状态，可复用本实例开始新一次拼接。</summary>
     public void Reset()
     {
+        ReturnInternalBuffers();
         _bgra = null;
+        _bgraFromPool = false;
         _lastFrame = null;
+        _lastFrameFromPool = false;
         _width = 0;
         _height = 0;
         _capacityHeight = 0;
@@ -186,6 +190,8 @@ public sealed class ScrollStitcher
         LastMatchAverageSadPerChannel = 0.0;
         IsAtBottom = false;
     }
+
+    public void Dispose() => Reset();
 
     /// <summary>
     /// 在新帧中匹配「上一帧底部 h 行」模板，返回新帧底部需追加的行数。
@@ -204,17 +210,26 @@ public sealed class ScrollStitcher
         int searchMax = frame.Height - h;            // 新帧中模板可能的最大起始行
         if (searchMax < 0) searchMax = 0;
 
-        long bestSad = long.MaxValue;
-        int bestRow = 0;
+        long bestSad;
+        int bestRow;
 
-        // 预先收集采样列偏移
-        for (int m = 0; m <= searchMax; m++)
+        if (TryFindExactSampleMatch(last, tStart, frame.Bgra, h, stride, searchMax, out bestRow))
         {
-            long sad = ComputeSad(last, tStart, frame.Bgra, m, h, stride, bestSad);
-            if (sad < bestSad || (sad == bestSad && m > bestRow))
+            bestSad = 0;
+        }
+        else
+        {
+            bestSad = long.MaxValue;
+            bestRow = 0;
+
+            for (int m = 0; m <= searchMax; m++)
             {
-                bestSad = sad;
-                bestRow = m;
+                long sad = ComputeSad(last, tStart, frame.Bgra, m, h, stride, bestSad);
+                if (sad < bestSad || (sad == bestSad && m > bestRow))
+                {
+                    bestSad = sad;
+                    bestRow = m;
+                }
             }
         }
 
@@ -233,6 +248,91 @@ public sealed class ScrollStitcher
         return averageSadPerChannel <= MaxAverageSadPerChannel;
     }
 
+    private bool TryFindExactSampleMatch(
+        byte[] last,
+        int tStart,
+        byte[] cand,
+        int h,
+        int stride,
+        int searchMax,
+        out int bestRow)
+    {
+        bestRow = 0;
+        int sampledRows = ((h - 1) / RowSampleStep) + 1;
+        int[]? templateRows = null;
+        ulong[]? templateHashes = null;
+        ulong[]? candidateHashes = null;
+
+        try
+        {
+            templateRows = ArrayPool<int>.Shared.Rent(sampledRows);
+            templateHashes = ArrayPool<ulong>.Shared.Rent(sampledRows);
+            int templateCount = 0;
+            for (int row = 0; row < h; row += RowSampleStep)
+            {
+                templateRows[templateCount] = row;
+                templateHashes[templateCount] = ComputeSampledRowHash(last, tStart + row, stride);
+                templateCount++;
+            }
+
+            int candidateHeight = searchMax + h;
+            candidateHashes = ArrayPool<ulong>.Shared.Rent(candidateHeight);
+            for (int row = 0; row < candidateHeight; row++)
+            {
+                candidateHashes[row] = ComputeSampledRowHash(cand, row, stride);
+            }
+
+            for (int m = searchMax; m >= 0; m--)
+            {
+                bool possible = true;
+                for (int i = 0; i < templateCount; i++)
+                {
+                    if (candidateHashes[m + templateRows[i]] != templateHashes[i])
+                    {
+                        possible = false;
+                        break;
+                    }
+                }
+
+                if (!possible)
+                    continue;
+
+                if (ComputeSad(last, tStart, cand, m, h, stride, currentBest: 0) == 0)
+                {
+                    bestRow = m;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        finally
+        {
+            if (templateRows is not null) ArrayPool<int>.Shared.Return(templateRows);
+            if (templateHashes is not null) ArrayPool<ulong>.Shared.Return(templateHashes);
+            if (candidateHashes is not null) ArrayPool<ulong>.Shared.Return(candidateHashes);
+        }
+    }
+
+    private ulong ComputeSampledRowHash(byte[] pixels, int row, int stride)
+    {
+        const ulong offsetBasis = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        ulong hash = offsetBasis;
+        int rowOffset = row * stride;
+        int colStepBytes = ColumnSampleStep * PixelBuffer.BytesPerPixel;
+
+        for (int xb = 0; xb < stride; xb += colStepBytes)
+        {
+            int i = rowOffset + xb;
+            hash = (hash ^ pixels[i]) * prime;
+            hash = (hash ^ pixels[i + 1]) * prime;
+            hash = (hash ^ pixels[i + 2]) * prime;
+        }
+
+        return hash;
+    }
+
     /// <summary>
     /// 计算模板（last 从 tStart 起 h 行）与候选（cand 从 candStart 起 h 行）的采样 SAD。
     /// 带列方向 early-abandon：累计超过 <paramref name="currentBest"/> 立即返回。
@@ -242,6 +342,7 @@ public sealed class ScrollStitcher
         byte[] cand, int candStart,
         int h, int stride, long currentBest)
     {
+        const int EarlyAbandonCheckInterval = 32;
         long sad = 0;
         int bpp = PixelBuffer.BytesPerPixel;
         int colStepBytes = ColumnSampleStep * bpp;
@@ -250,6 +351,7 @@ public sealed class ScrollStitcher
         {
             int lOff = (tStart + row) * stride;
             int cOff = (candStart + row) * stride;
+            int sampledColumns = 0;
             // 列采样：仅比较 R/G/B（跳过 alpha）
             for (int xb = 0; xb < stride; xb += colStepBytes)
             {
@@ -258,6 +360,9 @@ public sealed class ScrollStitcher
                 sad += Math.Abs(last[li] - cand[ci]);         // B
                 sad += Math.Abs(last[li + 1] - cand[ci + 1]); // G
                 sad += Math.Abs(last[li + 2] - cand[ci + 2]); // R
+                sampledColumns++;
+                if ((sampledColumns % EarlyAbandonCheckInterval) == 0 && sad > currentBest)
+                    return long.MaxValue;
             }
             if (sad > currentBest)
                 return long.MaxValue; // 提前放弃
@@ -284,12 +389,51 @@ public sealed class ScrollStitcher
             return;
 
         int newCapacity = Math.Max(requiredHeight, checked(Math.Max(_capacityHeight, 1) * 2));
-        var grown = new byte[checked(newCapacity * stride)];
+        var previous = _bgra;
+        bool previousFromPool = _bgraFromPool;
+        var grown = ArrayPool<byte>.Shared.Rent(checked(newCapacity * stride));
         Buffer.BlockCopy(_bgra, 0, grown, 0, checked(_height * stride));
         _bgra = grown;
-        _capacityHeight = newCapacity;
+        _bgraFromPool = true;
+        _capacityHeight = Math.Max(newCapacity, grown.Length / stride);
+
+        if (previousFromPool && !ReferenceEquals(_lastFrame, previous))
+            ArrayPool<byte>.Shared.Return(previous);
     }
 
-    private static byte[] RetainFrame(PixelBuffer frame, bool ownsFrame)
-        => ownsFrame ? frame.Bgra : (byte[])frame.Bgra.Clone();
+    private void ReplaceLastFrame(PixelBuffer frame, bool ownsFrame)
+    {
+        var previous = _lastFrame;
+        bool previousFromPool = _lastFrameFromPool;
+
+        _lastFrame = RetainFrame(frame, ownsFrame, out _lastFrameFromPool);
+        _lastFrameHeight = frame.Height;
+
+        if (previousFromPool && !ReferenceEquals(previous, _bgra))
+            ArrayPool<byte>.Shared.Return(previous!);
+    }
+
+    private void ReturnInternalBuffers()
+    {
+        var bgra = _bgra;
+        var last = _lastFrame;
+        if (_bgraFromPool && bgra is not null)
+            ArrayPool<byte>.Shared.Return(bgra);
+        if (_lastFrameFromPool && last is not null && !ReferenceEquals(last, bgra))
+            ArrayPool<byte>.Shared.Return(last);
+    }
+
+    private static byte[] RetainFrame(PixelBuffer frame, bool ownsFrame, out bool fromPool)
+    {
+        if (ownsFrame)
+        {
+            fromPool = false;
+            return frame.Bgra;
+        }
+
+        byte[] copy = ArrayPool<byte>.Shared.Rent(frame.Bgra.Length);
+        Buffer.BlockCopy(frame.Bgra, 0, copy, 0, frame.Bgra.Length);
+        fromPool = true;
+        return copy;
+    }
 }

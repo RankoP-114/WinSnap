@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -81,26 +82,33 @@ public static class ScreenBitmapSourceCapture
         int bitsPerPixel = source.Format.BitsPerPixel;
         int bytesPerPixel = Math.Max(3, (bitsPerPixel + 7) / 8);
         int stride = checked(((width * bitsPerPixel) + 7) / 8);
-        var row = new byte[stride];
+        byte[] row = ArrayPool<byte>.Shared.Rent(stride);
         int copiedY = -1;
         int hits = 0;
 
-        for (long p = 0; p < pixelCount; p += step)
+        try
         {
-            int x = (int)(p % width);
-            int y = (int)(p / width);
-            if (y != copiedY)
+            for (long p = 0; p < pixelCount; p += step)
             {
-                source.CopyPixels(new Int32Rect(0, y, width, 1), row, stride, 0);
-                copiedY = y;
-            }
+                int x = (int)(p % width);
+                int y = (int)(p / width);
+                if (y != copiedY)
+                {
+                    source.CopyPixels(new Int32Rect(0, y, width, 1), row, stride, 0);
+                    copiedY = y;
+                }
 
-            int offset = x * bytesPerPixel;
-            byte b = row[offset];
-            byte g = row[offset + 1];
-            byte r = row[offset + 2];
-            if (Math.Max(r, Math.Max(g, b)) > threshold && ++hits >= requiredHits)
-                return true;
+                int offset = x * bytesPerPixel;
+                byte b = row[offset];
+                byte g = row[offset + 1];
+                byte r = row[offset + 2];
+                if (Math.Max(r, Math.Max(g, b)) > threshold && ++hits >= requiredHits)
+                    return true;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(row);
         }
 
         return false;

@@ -209,4 +209,64 @@ public class ToneMapperTests
         Assert.Equal(bulk[2], pixel.R);
         Assert.Equal(bulk[3], pixel.A);
     }
+
+    [Fact]
+    public void PrecomputedParameters_MatchPixelApiAndBulkMapper()
+    {
+        var mapper = new ToneMapper();
+        var px = OnePixel(3.1f, 0.7f, 1.8f, 0.6f);
+        var parameters = ToneMapper.CreateMappingParameters(
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+
+        var bulk = mapper.MapToSdrBgra(
+            px,
+            1,
+            1,
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+        var validatedPixel = ToneMapper.MapScRgbPixelToSdrBgra(
+            px[0],
+            px[1],
+            px[2],
+            px[3],
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+        var precomputedPixel = ToneMapper.MapScRgbPixelToSdrBgra(
+            px[0],
+            px[1],
+            px[2],
+            px[3],
+            parameters);
+
+        Assert.Equal(validatedPixel, precomputedPixel);
+        Assert.Equal(bulk[0], precomputedPixel.B);
+        Assert.Equal(bulk[1], precomputedPixel.G);
+        Assert.Equal(bulk[2], precomputedPixel.R);
+        Assert.Equal(bulk[3], precomputedPixel.A);
+    }
+
+    [Fact]
+    public void PrecomputedParameters_SaturatedWhiteMapsTo255()
+    {
+        var parameters = ToneMapper.CreateMappingParameters(
+            sdrWhiteNits: 80,
+            hdrPeakNits: 80,
+            inputIsRec2020: false);
+
+        var pixel = ToneMapper.MapScRgbPixelToSdrBgra(
+            1f,
+            1f,
+            1f,
+            1f,
+            parameters);
+
+        Assert.Equal(255, pixel.R);
+        Assert.Equal(255, pixel.G);
+        Assert.Equal(255, pixel.B);
+        Assert.Equal(255, pixel.A);
+    }
 }

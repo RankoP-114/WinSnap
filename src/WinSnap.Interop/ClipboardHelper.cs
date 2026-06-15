@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
@@ -125,13 +126,20 @@ public static class ClipboardHelper
         {
             byte[] src = image.PixelsBgra;
             int rowBytes = width * 4;
-            byte[] row = new byte[rowBytes];
-            for (int y = 0; y < height; y++)
+            byte[] row = ArrayPool<byte>.Shared.Rent(rowBytes);
+            try
             {
-                Buffer.BlockCopy(src, y * stride, row, 0, rowBytes);
-                for (int i = 3; i < rowBytes; i += 4)
-                    row[i] = 0xFF;
-                Marshal.Copy(row, 0, data.Scan0 + y * data.Stride, rowBytes);
+                for (int y = 0; y < height; y++)
+                {
+                    Buffer.BlockCopy(src, y * stride, row, 0, rowBytes);
+                    for (int i = 3; i < rowBytes; i += 4)
+                        row[i] = 0xFF;
+                    Marshal.Copy(row, 0, data.Scan0 + y * data.Stride, rowBytes);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(row);
             }
         }
         finally

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -202,128 +203,143 @@ public sealed class AnnotationCanvas : FrameworkElement
     /// <summary>对背景某区域做块平均像素化，返回 Bgra32 位图。</summary>
     private static BitmapSource Pixelate(BitmapSource src, int sx, int sy, int w, int h, int block)
     {
-        var px = CopyBgraPixels(src, sx, sy, w, h);
         int stride = w * 4;
-
-        for (int by = 0; by < h; by += block)
-        for (int bx = 0; bx < w; bx += block)
+        var px = CopyBgraPixels(src, sx, sy, w, h);
+        try
         {
-            int ye = Math.Min(by + block, h), xe = Math.Min(bx + block, w);
-            long b = 0, g = 0, r = 0;
-            int count = 0;
-            for (int y = by; y < ye; y++)
-                for (int x = bx; x < xe; x++)
-                {
-                    int i = y * stride + x * 4;
-                    b += px[i]; g += px[i + 1]; r += px[i + 2];
-                    count++;
-                }
-            byte bb = (byte)(b / count), gg = (byte)(g / count), rr = (byte)(r / count);
-            for (int y = by; y < ye; y++)
-                for (int x = bx; x < xe; x++)
-                {
-                    int i = y * stride + x * 4;
-                    px[i] = bb; px[i + 1] = gg; px[i + 2] = rr; px[i + 3] = 255;
-                }
-        }
+            for (int by = 0; by < h; by += block)
+            for (int bx = 0; bx < w; bx += block)
+            {
+                int ye = Math.Min(by + block, h), xe = Math.Min(bx + block, w);
+                long b = 0, g = 0, r = 0;
+                int count = 0;
+                for (int y = by; y < ye; y++)
+                    for (int x = bx; x < xe; x++)
+                    {
+                        int i = y * stride + x * 4;
+                        b += px[i]; g += px[i + 1]; r += px[i + 2];
+                        count++;
+                    }
+                byte bb = (byte)(b / count), gg = (byte)(g / count), rr = (byte)(r / count);
+                for (int y = by; y < ye; y++)
+                    for (int x = bx; x < xe; x++)
+                    {
+                        int i = y * stride + x * 4;
+                        px[i] = bb; px[i + 1] = gg; px[i + 2] = rr; px[i + 3] = 255;
+                    }
+            }
 
-        var result = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, px, stride);
-        result.Freeze();
-        return result;
+            var result = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, px, stride);
+            result.Freeze();
+            return result;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(px);
+        }
     }
 
     /// <summary>对背景某区域做盒式模糊，返回 Bgra32 位图。</summary>
     private static BitmapSource Blur(BitmapSource src, int sx, int sy, int w, int h, int radius)
     {
-        var px = CopyBgraPixels(src, sx, sy, w, h);
         int stride = w * 4;
+        int pixelBytes = checked(stride * h);
+        var px = CopyBgraPixels(src, sx, sy, w, h);
         int r = Math.Clamp(radius, 2, 64);
-        var temp = new byte[px.Length];
-        var dst = new byte[px.Length];
+        byte[] temp = ArrayPool<byte>.Shared.Rent(pixelBytes);
+        byte[] dst = ArrayPool<byte>.Shared.Rent(pixelBytes);
 
-        for (int y = 0; y < h; y++)
+        try
         {
-            long b = 0, g = 0, red = 0;
-            int count = 0;
-            int left = 0;
-            int right = -1;
-            int row = y * stride;
+            for (int y = 0; y < h; y++)
+            {
+                long b = 0, g = 0, red = 0;
+                int count = 0;
+                int left = 0;
+                int right = -1;
+                int row = y * stride;
+
+                for (int x = 0; x < w; x++)
+                {
+                    int targetLeft = Math.Max(0, x - r);
+                    int targetRight = Math.Min(w - 1, x + r);
+                    while (right < targetRight)
+                    {
+                        right++;
+                        int i = row + right * 4;
+                        b += px[i];
+                        g += px[i + 1];
+                        red += px[i + 2];
+                        count++;
+                    }
+
+                    while (left < targetLeft)
+                    {
+                        int i = row + left * 4;
+                        b -= px[i];
+                        g -= px[i + 1];
+                        red -= px[i + 2];
+                        count--;
+                        left++;
+                    }
+
+                    int o = row + x * 4;
+                    temp[o] = (byte)(b / count);
+                    temp[o + 1] = (byte)(g / count);
+                    temp[o + 2] = (byte)(red / count);
+                    temp[o + 3] = 255;
+                }
+            }
 
             for (int x = 0; x < w; x++)
             {
-                int targetLeft = Math.Max(0, x - r);
-                int targetRight = Math.Min(w - 1, x + r);
-                while (right < targetRight)
-                {
-                    right++;
-                    int i = row + right * 4;
-                    b += px[i];
-                    g += px[i + 1];
-                    red += px[i + 2];
-                    count++;
-                }
+                long b = 0, g = 0, red = 0;
+                int count = 0;
+                int top = 0;
+                int bottom = -1;
+                int xOffset = x * 4;
 
-                while (left < targetLeft)
+                for (int y = 0; y < h; y++)
                 {
-                    int i = row + left * 4;
-                    b -= px[i];
-                    g -= px[i + 1];
-                    red -= px[i + 2];
-                    count--;
-                    left++;
-                }
+                    int targetTop = Math.Max(0, y - r);
+                    int targetBottom = Math.Min(h - 1, y + r);
+                    while (bottom < targetBottom)
+                    {
+                        bottom++;
+                        int i = bottom * stride + xOffset;
+                        b += temp[i];
+                        g += temp[i + 1];
+                        red += temp[i + 2];
+                        count++;
+                    }
 
-                int o = row + x * 4;
-                temp[o] = (byte)(b / count);
-                temp[o + 1] = (byte)(g / count);
-                temp[o + 2] = (byte)(red / count);
-                temp[o + 3] = 255;
+                    while (top < targetTop)
+                    {
+                        int i = top * stride + xOffset;
+                        b -= temp[i];
+                        g -= temp[i + 1];
+                        red -= temp[i + 2];
+                        count--;
+                        top++;
+                    }
+
+                    int o = y * stride + xOffset;
+                    dst[o] = (byte)(b / count);
+                    dst[o + 1] = (byte)(g / count);
+                    dst[o + 2] = (byte)(red / count);
+                    dst[o + 3] = 255;
+                }
             }
+            var result = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, dst, stride);
+            result.Freeze();
+            return result;
         }
-
-        for (int x = 0; x < w; x++)
+        finally
         {
-            long b = 0, g = 0, red = 0;
-            int count = 0;
-            int top = 0;
-            int bottom = -1;
-            int xOffset = x * 4;
-
-            for (int y = 0; y < h; y++)
-            {
-                int targetTop = Math.Max(0, y - r);
-                int targetBottom = Math.Min(h - 1, y + r);
-                while (bottom < targetBottom)
-                {
-                    bottom++;
-                    int i = bottom * stride + xOffset;
-                    b += temp[i];
-                    g += temp[i + 1];
-                    red += temp[i + 2];
-                    count++;
-                }
-
-                while (top < targetTop)
-                {
-                    int i = top * stride + xOffset;
-                    b -= temp[i];
-                    g -= temp[i + 1];
-                    red -= temp[i + 2];
-                    count--;
-                    top++;
-                }
-
-                int o = y * stride + xOffset;
-                dst[o] = (byte)(b / count);
-                dst[o + 1] = (byte)(g / count);
-                dst[o + 2] = (byte)(red / count);
-                dst[o + 3] = 255;
-            }
+            ArrayPool<byte>.Shared.Return(px);
+            ArrayPool<byte>.Shared.Return(temp);
+            ArrayPool<byte>.Shared.Return(dst);
         }
-
-        var result = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, dst, stride);
-        result.Freeze();
-        return result;
     }
 
     private static byte[] CopyBgraPixels(BitmapSource src, int sx, int sy, int w, int h)
@@ -341,9 +357,18 @@ public sealed class AnnotationCanvas : FrameworkElement
         }
 
         int stride = w * 4;
-        var px = new byte[stride * h];
-        source.CopyPixels(px, stride, 0);
-        return px;
+        int pixelBytes = checked(stride * h);
+        var px = ArrayPool<byte>.Shared.Rent(pixelBytes);
+        try
+        {
+            source.CopyPixels(px, stride, 0);
+            return px;
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(px);
+            throw;
+        }
     }
 
     private readonly record struct MosaicCacheKey(

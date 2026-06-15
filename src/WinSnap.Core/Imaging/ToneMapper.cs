@@ -30,6 +30,31 @@ public sealed class ToneMapper
     /// <summary>极暗部 black-boost 抬升量（相对输出亮度，0 表示不抬升）。</summary>
     public double BlackBoost { get; init; }
 
+    /// <summary>预计算后的 tone-map 参数。用于逐像素/流式路径避免重复做参数校验和常量除法。</summary>
+    public readonly record struct MappingParameters(
+        double XPeak,
+        double ScaleScrgbToRel,
+        bool InputIsRec2020,
+        double BlackBoost);
+
+    /// <summary>创建可复用的 tone-map 参数。适合 Desktop Duplication 逐像素流式转换路径。</summary>
+    public static MappingParameters CreateMappingParameters(
+        double sdrWhiteNits = DefaultSdrWhiteNits,
+        double hdrPeakNits = DefaultHdrPeakNits,
+        bool inputIsRec2020 = true,
+        double blackBoost = 0.0)
+    {
+        if (!IsPositiveFinite(sdrWhiteNits)) throw new ArgumentOutOfRangeException(nameof(sdrWhiteNits));
+        if (!IsPositiveFinite(hdrPeakNits)) throw new ArgumentOutOfRangeException(nameof(hdrPeakNits));
+        if (hdrPeakNits < sdrWhiteNits) hdrPeakNits = sdrWhiteNits; // peak 不应低于白点
+
+        return new MappingParameters(
+            XPeak: hdrPeakNits / sdrWhiteNits,
+            ScaleScrgbToRel: ScrgbWhiteNits / sdrWhiteNits,
+            InputIsRec2020: inputIsRec2020,
+            BlackBoost: blackBoost);
+    }
+
     /// <summary>
     /// 把一整幅 scRGB 线性像素映射为 SDR sRGB 8bit BGRA（top-down, stride=width*4）。
     /// </summary>
@@ -59,9 +84,7 @@ public sealed class ToneMapper
             throw new ArgumentException(
                 $"输入长度应为 {expected}（{width}x{height}*4），实际 {scRgbaLinear.Length}。",
                 nameof(scRgbaLinear));
-        if (!IsPositiveFinite(sdrWhiteNits)) throw new ArgumentOutOfRangeException(nameof(sdrWhiteNits));
-        if (!IsPositiveFinite(hdrPeakNits)) throw new ArgumentOutOfRangeException(nameof(hdrPeakNits));
-        if (hdrPeakNits < sdrWhiteNits) hdrPeakNits = sdrWhiteNits; // peak 不应低于白点
+        var parameters = CreateMappingParameters(sdrWhiteNits, hdrPeakNits, inputIsRec2020, BlackBoost);
 
         var dst = new byte[expected];
 
@@ -74,10 +97,7 @@ public sealed class ToneMapper
                 scRgbaLinear[s + 1],
                 scRgbaLinear[s + 2],
                 scRgbaLinear[s + 3],
-                sdrWhiteNits,
-                hdrPeakNits,
-                inputIsRec2020,
-                BlackBoost);
+                parameters);
 
             dst[s] = b;
             dst[s + 1] = g;
@@ -101,19 +121,25 @@ public sealed class ToneMapper
         double hdrPeakNits = DefaultHdrPeakNits,
         bool inputIsRec2020 = true)
     {
-        if (!IsPositiveFinite(sdrWhiteNits)) throw new ArgumentOutOfRangeException(nameof(sdrWhiteNits));
-        if (!IsPositiveFinite(hdrPeakNits)) throw new ArgumentOutOfRangeException(nameof(hdrPeakNits));
-        if (hdrPeakNits < sdrWhiteNits) hdrPeakNits = sdrWhiteNits;
+        var parameters = CreateMappingParameters(sdrWhiteNits, hdrPeakNits, inputIsRec2020);
 
         return MapScRgbPixelToSdrBgraCore(
             rLinear,
             gLinear,
             bLinear,
             aLinear,
-            sdrWhiteNits,
-            hdrPeakNits,
-            inputIsRec2020,
-            blackBoost: 0.0);
+            parameters);
+    }
+
+    /// <summary>使用预计算参数映射单个 scRGB 像素到 SDR BGRA。调用方负责复用同一组参数。</summary>
+    public static (byte B, byte G, byte R, byte A) MapScRgbPixelToSdrBgra(
+        float rLinear,
+        float gLinear,
+        float bLinear,
+        float aLinear,
+        MappingParameters parameters)
+    {
+        return MapScRgbPixelToSdrBgraCore(rLinear, gLinear, bLinear, aLinear, parameters);
     }
 
     private static (byte B, byte G, byte R, byte A) MapScRgbPixelToSdrBgraCore(
@@ -121,25 +147,18 @@ public sealed class ToneMapper
         float gLinear,
         float bLinear,
         float aLinear,
-        double sdrWhiteNits,
-        double hdrPeakNits,
-        bool inputIsRec2020,
-        double blackBoost)
+        MappingParameters parameters)
     {
-        // EETF 参数（相对 SDR 白线性域）：膝点略低于白点，源峰值归一 = hdrPeak/sdrWhite。
-        double xPeak = hdrPeakNits / sdrWhiteNits; // >= 1
-        double scaleScrgbToRel = ScrgbWhiteNits / sdrWhiteNits; // scRGB→相对SDR白线性 的合成系数
-
         // ① scRGB → 相对 SDR 白线性（白点 = 1.0）
-        double rRel = ToRelativeSdrWhite(rLinear, scaleScrgbToRel, xPeak);
-        double gRel = ToRelativeSdrWhite(gLinear, scaleScrgbToRel, xPeak);
-        double bRel = ToRelativeSdrWhite(bLinear, scaleScrgbToRel, xPeak);
+        double rRel = ToRelativeSdrWhite(rLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
+        double gRel = ToRelativeSdrWhite(gLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
+        double bRel = ToRelativeSdrWhite(bLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
 
         // ② maxRGB EETF：对峰值通道求肩部压缩增益，等比缩放（保色相）
         double maxRel = Math.Max(rRel, Math.Max(gRel, bRel));
         if (maxRel > 1e-9)
         {
-            double mapped = Eetf(maxRel, KneeStart, xPeak, blackBoost);
+            double mapped = Eetf(maxRel, KneeStart, parameters.XPeak, parameters.BlackBoost);
             double gain = mapped / maxRel;
             rRel *= gain;
             gRel *= gain;
@@ -151,7 +170,7 @@ public sealed class ToneMapper
         double r709;
         double g709;
         double b709;
-        if (inputIsRec2020)
+        if (parameters.InputIsRec2020)
         {
             r709 = (1.6604910 * rRel) - (0.5876411 * gRel) - (0.0728499 * bRel);
             g709 = (-0.1245505 * rRel) + (1.1328999 * gRel) - (0.0083494 * bRel);
@@ -212,6 +231,7 @@ public sealed class ToneMapper
     private static double SrgbOetf(double c)
     {
         if (c <= 0.0031308) return 12.92 * c;
+        if (c >= 1.0) return 1.0;
         return (1.055 * Math.Pow(c, 1.0 / 2.4)) - 0.055;
     }
 

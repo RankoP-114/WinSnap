@@ -52,7 +52,7 @@ public sealed class ScrollCaptureService
         int centerX = regionX + regionW / 2;
         int centerY = regionY + regionH / 2;
 
-        var stitcher = new ScrollStitcher();
+        using var stitcher = new ScrollStitcher();
         var captureDispatcher = Application.Current?.Dispatcher;
 
         try
