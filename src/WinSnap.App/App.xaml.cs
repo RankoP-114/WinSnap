@@ -81,7 +81,6 @@ public partial class App : Application
         // ---- 托盘 ----
         _tray = _services.GetRequiredService<TrayService>();
         _tray.CaptureRequested += capture.StartCapture;
-        _tray.LongCaptureRequested += capture.StartLongCapture;
         _tray.GifCaptureRequested += capture.StartGifCaptureWithDurationPrompt;
         _tray.CloseAllPinsRequested += capture.CloseAllPins;
         _tray.SettingsRequested += OnSettingsRequested;
@@ -92,12 +91,12 @@ public partial class App : Application
         _hotkeys = _services.GetRequiredService<HotkeyManager>();
         _hotkeys.CaptureTriggered += capture.StartCapture;
         _hotkeys.PinTriggered += capture.StartPinCapture;
-        _hotkeys.ScrollCaptureTriggered += capture.StartLongCapture;
+        _hotkeys.GifCaptureTriggered += capture.StartGifCaptureWithDurationPrompt;
         bool hotkeyRegistered = _hotkeys.Initialize(settingsService.Current);
         if (!hotkeyRegistered)
         {
             _tray.ShowMessage("全局热键注册失败",
-                "截图 / 钉图 / 长截图热键中至少有一个注册失败，可能被其它程序占用。" +
+                "截图 / 钉图 / GIF 录制热键中至少有一个注册失败，可能被其它程序占用。" +
                 "可从托盘菜单使用功能，或稍后在设置中更换热键。");
         }
 
@@ -156,13 +155,13 @@ public partial class App : Application
     {
         var settings = _services!.GetRequiredService<SettingsService>();
         var window = new WinSnap.App.Settings.SettingsWindow(settings);
-        window.HotkeysChanged += (captureHotkey, pinHotkey, scrollHotkey) =>
+        window.HotkeysChanged += (captureHotkey, pinHotkey, gifHotkey) =>
         {
-            bool registered = _hotkeys?.RegisterConfiguredHotkeys(captureHotkey, pinHotkey, scrollHotkey) == true;
+            bool registered = _hotkeys?.RegisterConfiguredHotkeys(captureHotkey, pinHotkey, gifHotkey) == true;
             if (!registered)
             {
                 _tray?.ShowMessage("全局热键注册失败",
-                    "截图 / 钉图 / 长截图热键中至少有一个注册失败，原热键已保留。");
+                    "截图 / 钉图 / GIF 录制热键中至少有一个注册失败，原热键已保留。");
             }
             return registered;
         };

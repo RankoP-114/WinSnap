@@ -35,7 +35,7 @@ public partial class SettingsWindow : Window
     public event EventHandler? Saved;
 
     /// <summary>
-    /// 保存时若任一全局热键发生变化，则额外触发本事件，参数为新的截图 / 钉图 / 长截图热键。
+    /// 保存时若任一全局热键发生变化，则额外触发本事件，参数为新的截图 / 钉图 / GIF 录制热键。
     /// 订阅方应在返回 true 前完成注册；返回 false 时本窗口不落盘。
     /// </summary>
     public event Func<string, string, string, bool>? HotkeysChanged;
@@ -71,7 +71,7 @@ public partial class SettingsWindow : Window
             // ② 截图热键
             CaptureHotkeyRecorder.Hotkey = s.CaptureHotkey ?? string.Empty;
             PinHotkeyRecorder.Hotkey = s.PinHotkey ?? string.Empty;
-            ScrollHotkeyRecorder.Hotkey = s.ScrollCaptureHotkey ?? string.Empty;
+            GifHotkeyRecorder.Hotkey = s.GifCaptureHotkey ?? string.Empty;
 
             // ③ 开机自启：以注册表实际状态为准（与配置可能不同步时，注册表优先反映真实情况）
             string? exe = Environment.ProcessPath;
@@ -172,12 +172,12 @@ public partial class SettingsWindow : Window
         // 记录变更前的热键，便于判断是否需要通知重注册。截图热键不允许清空。
         string oldCaptureHotkey = s.CaptureHotkey ?? string.Empty;
         string oldPinHotkey = s.PinHotkey ?? string.Empty;
-        string oldScrollHotkey = s.ScrollCaptureHotkey ?? string.Empty;
+        string oldGifHotkey = s.GifCaptureHotkey ?? string.Empty;
         string requestedCaptureHotkey = string.IsNullOrWhiteSpace(CaptureHotkeyRecorder.Hotkey)
             ? oldCaptureHotkey
             : CaptureHotkeyRecorder.Hotkey;
         string requestedPinHotkey = PinHotkeyRecorder.Hotkey ?? string.Empty;
-        string requestedScrollHotkey = ScrollHotkeyRecorder.Hotkey ?? string.Empty;
+        string requestedGifHotkey = GifHotkeyRecorder.Hotkey ?? string.Empty;
 
         string saveFormat = FormatJpgRadio.IsChecked == true ? "jpg" : "png";
         string? saveDirectory = string.IsNullOrWhiteSpace(SaveDirTextBox.Text)
@@ -202,9 +202,9 @@ public partial class SettingsWindow : Window
         bool hotkeysChanged =
             !string.Equals(oldCaptureHotkey, requestedCaptureHotkey, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(oldPinHotkey, requestedPinHotkey, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(oldScrollHotkey, requestedScrollHotkey, StringComparison.OrdinalIgnoreCase);
+            !string.Equals(oldGifHotkey, requestedGifHotkey, StringComparison.OrdinalIgnoreCase);
         if (hotkeysChanged && HotkeysChanged is { } hotkeysChangedHandler &&
-            !hotkeysChangedHandler.Invoke(requestedCaptureHotkey, requestedPinHotkey, requestedScrollHotkey))
+            !hotkeysChangedHandler.Invoke(requestedCaptureHotkey, requestedPinHotkey, requestedGifHotkey))
         {
             MessageBox.Show(this,
                 "全局热键注册失败，可能已被其它程序占用。设置未保存，原热键已保留。",
@@ -223,7 +223,8 @@ public partial class SettingsWindow : Window
             Theme = theme,
             CaptureHotkey = requestedCaptureHotkey,
             PinHotkey = requestedPinHotkey,
-            ScrollCaptureHotkey = requestedScrollHotkey,
+            ScrollCaptureHotkey = string.Empty,
+            GifCaptureHotkey = requestedGifHotkey,
             DefaultSaveFormat = saveFormat,
             JpegQuality = jpegQuality,
             LastSaveDirectory = saveDirectory,
@@ -245,7 +246,7 @@ public partial class SettingsWindow : Window
         catch (Exception ex)
         {
             if (hotkeysChanged && HotkeysChanged is { } restoreHotkeys)
-                restoreHotkeys.Invoke(oldCaptureHotkey, oldPinHotkey, oldScrollHotkey);
+                restoreHotkeys.Invoke(oldCaptureHotkey, oldPinHotkey, oldGifHotkey);
 
             MessageBox.Show(this,
                 ex.Message,

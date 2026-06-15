@@ -19,9 +19,6 @@ public sealed class TrayService : IDisposable
     /// <summary>请求打开设置窗口。</summary>
     public event Action? SettingsRequested;
 
-    /// <summary>请求长截图（滚动拼接）。</summary>
-    public event Action? LongCaptureRequested;
-
     /// <summary>请求 GIF 录制。</summary>
     public event Action? GifCaptureRequested;
 
@@ -41,10 +38,6 @@ public sealed class TrayService : IDisposable
         var captureItem = new MenuItem { Header = "截图 (Ctrl+Alt+A)" };
         captureItem.Click += (_, _) => CaptureRequested?.Invoke();
         menu.Items.Add(captureItem);
-
-        var longCaptureItem = new MenuItem { Header = "长截图（滚动）" };
-        longCaptureItem.Click += (_, _) => LongCaptureRequested?.Invoke();
-        menu.Items.Add(longCaptureItem);
 
         var gifCaptureItem = new MenuItem { Header = "GIF 录制" };
         gifCaptureItem.Click += (_, _) => GifCaptureRequested?.Invoke();

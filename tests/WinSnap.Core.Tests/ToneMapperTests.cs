@@ -181,4 +181,32 @@ public class ToneMapperTests
         Assert.Equal(gray[2], gray[1]);
         Assert.Equal(gray[1], gray[0]);
     }
+
+    [Fact]
+    public void PixelApi_MatchesBulkMapper_ForDefaultBlackBoost()
+    {
+        var mapper = new ToneMapper();
+        var px = OnePixel(2.4f, 1.2f, 0.35f, 0.75f);
+
+        var bulk = mapper.MapToSdrBgra(
+            px,
+            1,
+            1,
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+        var pixel = ToneMapper.MapScRgbPixelToSdrBgra(
+            px[0],
+            px[1],
+            px[2],
+            px[3],
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+
+        Assert.Equal(bulk[0], pixel.B);
+        Assert.Equal(bulk[1], pixel.G);
+        Assert.Equal(bulk[2], pixel.R);
+        Assert.Equal(bulk[3], pixel.A);
+    }
 }

@@ -5,15 +5,16 @@
         AllowsTransparency="True"
         Background="Transparent"
         ShowInTaskbar="False"
+        ShowActivated="False"
         Topmost="True"
         ResizeMode="NoResize"
-        IsHitTestVisible="False"
         Opacity="0">
-    <Border Background="#E61F1F1F"
+    <Border x:Name="Root"
+            Background="#E61F1F1F"
             BorderBrush="#33FFFFFF"
             BorderThickness="1"
             CornerRadius="8"
-            Padding="14,8">
+            Padding="12,7">
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
             <Ellipse Width="10" Height="10" Fill="#FFFF3B30" Margin="0,0,8,0" />
             <TextBlock x:Name="StatusText"
@@ -21,7 +22,20 @@
                        Foreground="White"
                        FontSize="14"
                        FontWeight="SemiBold"
+                       MinWidth="66"
                        VerticalAlignment="Center" />
+            <Button x:Name="StopButton"
+                    Content="停止"
+                    Margin="10,0,0,0"
+                    Padding="10,3"
+                    MinWidth="48"
+                    FontSize="13"
+                    Foreground="White"
+                    Background="#33FFFFFF"
+                    BorderBrush="#55FFFFFF"
+                    BorderThickness="1"
+                    Focusable="False"
+                    Cursor="Hand" />
         </StackPanel>
     </Border>
 </Window>

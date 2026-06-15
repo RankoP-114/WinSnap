@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using Serilog;
 using WinSnap.App.Diagnostics;
@@ -32,9 +33,9 @@ public sealed class CaptureController
 
     public void StartCapture()
     {
-        if (_session is not null)
+        if (_session is not null || _isGifRecording)
         {
-            Log.Debug("已有截图会话进行中，忽略本次触发");
+            Log.Debug("已有截图会话或 GIF 录制进行中，忽略本次截图触发");
             return;
         }
 
@@ -59,9 +60,9 @@ public sealed class CaptureController
 
     public void StartLongCapture()
     {
-        if (_session is not null)
+        if (_session is not null || _isGifRecording)
         {
-            Log.Debug("已有会话进行中，忽略长截图触发");
+            Log.Debug("已有会话或 GIF 录制进行中，忽略长截图触发");
             return;
         }
 
@@ -87,9 +88,9 @@ public sealed class CaptureController
 
     public void StartPinCapture()
     {
-        if (_session is not null)
+        if (_session is not null || _isGifRecording)
         {
-            Log.Debug("已有会话进行中，忽略钉图触发");
+            Log.Debug("已有会话或 GIF 录制进行中，忽略钉图触发");
             return;
         }
 
@@ -195,8 +196,10 @@ public sealed class CaptureController
         CaptureSession.GifOutputMode outputMode,
         GifCaptureOptions options)
     {
+        using var recordingCts = new CancellationTokenSource();
         string? outputPath = null;
         GifRecordingStatusWindow? statusWindow = null;
+        GifCaptureFrameWindow? frameWindow = null;
         try
         {
             _isGifRecording = true;
@@ -206,19 +209,30 @@ public sealed class CaptureController
             if (string.IsNullOrEmpty(outputPath))
                 return;
 
-            await GifCountdownWindow.ShowCountdownAsync(x, y, w, h, options.CountdownSeconds, CancellationToken.None);
+            await GifCountdownWindow.ShowCountdownAsync(x, y, w, h, options.CountdownSeconds, recordingCts.Token);
+
+            frameWindow = new GifCaptureFrameWindow(x, y, w, h);
+            frameWindow.Show();
+            await Dispatcher.Yield(DispatcherPriority.Render);
 
             statusWindow = new GifRecordingStatusWindow(x, y, w, h);
-            statusWindow.SetRemainingSeconds(options.DurationSeconds);
+            statusWindow.StopRequested += recordingCts.Cancel;
             statusWindow.Show();
-
-            var progress = new Progress<int>(seconds =>
-            {
-                statusWindow?.SetRemainingSeconds(seconds);
-            });
+            statusWindow.StartCountdown(options.DurationSeconds);
+            await statusWindow.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Render);
 
             var service = new GifCaptureService();
-            await service.CaptureAsync(x, y, w, h, options, outputPath, CancellationToken.None, progress);
+            await Task.Run(
+                async () => await service.CaptureAsync(
+                    x,
+                    y,
+                    w,
+                    h,
+                    options,
+                    outputPath,
+                    recordingCts.Token).ConfigureAwait(false),
+                recordingCts.Token);
+            statusWindow.SetSaving();
 
             if (outputMode == CaptureSession.GifOutputMode.Copy)
             {
@@ -228,6 +242,14 @@ public sealed class CaptureController
             else
             {
                 Log.Information("GIF 已保存：{Path}", outputPath);
+            }
+        }
+        catch (OperationCanceledException) when (recordingCts.IsCancellationRequested)
+        {
+            Log.Information("GIF 录制已停止");
+            if (!string.IsNullOrEmpty(outputPath))
+            {
+                try { File.Delete(outputPath); } catch { }
             }
         }
         catch (Exception ex)
@@ -242,8 +264,12 @@ public sealed class CaptureController
         }
         finally
         {
+            if (statusWindow is not null)
+                statusWindow.StopRequested -= recordingCts.Cancel;
             statusWindow?.Close();
+            frameWindow?.Close();
             _isGifRecording = false;
+            MemoryTrimmer.TrimAfterCapture();
         }
     }
 
@@ -313,7 +339,7 @@ public sealed class CaptureController
                 hdrSdrWhiteNits: hdrSdrWhiteNits,
                 hdrPeakNits: hdrPeakNits);
             var diagnostics = DuplicationCapture.LastDiagnostics;
-            foreach (var line in DuplicationCapture.LastDiagnostics)
+            foreach (var line in diagnostics)
                 Log.Information("HDR 捕获诊断：{Diag}", line);
 
             if (!hdr.HasVisibleContent() && diagnostics.Count > 0)

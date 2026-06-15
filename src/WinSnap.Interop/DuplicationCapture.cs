@@ -5,6 +5,7 @@ using Vortice;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
+using Vortice.Mathematics;
 using WinSnap.Core.Imaging;
 
 namespace WinSnap.Interop;
@@ -48,8 +49,11 @@ public static class DuplicationCapture
     /// <summary>整块屏获取有效帧的总时间预算（毫秒），超时即放弃该屏。</summary>
     private const int AcquireTotalBudgetMs = 1500;
 
-    /// <summary>诊断日志（捕获过程中各屏的降级原因）；调用方可选读。</summary>
-    public static IReadOnlyList<string> LastDiagnostics { get; private set; } = Array.Empty<string>();
+    [ThreadStatic]
+    private static IReadOnlyList<string>? _lastDiagnostics;
+
+    /// <summary>当前线程最近一次捕获的诊断日志（捕获过程中各屏的降级原因）；调用方可选读。</summary>
+    public static IReadOnlyList<string> LastDiagnostics => _lastDiagnostics ?? Array.Empty<string>();
 
     /// <summary>
     /// 抓取整个虚拟桌面，对 HDR 屏做 scRGB→SDR tone map，对 SDR 屏近似原样还原。
@@ -70,7 +74,7 @@ public static class DuplicationCapture
 
         if (canvasW == 0 || canvasH == 0)
         {
-            LastDiagnostics = diag;
+            SetLastDiagnostics(diag);
             return new CapturedImage(canvasW, canvasH, Array.Empty<byte>());
         }
 
@@ -85,14 +89,251 @@ public static class DuplicationCapture
         if (!gdiBaseHasVisibleContent)
             diag.Add("GDI 基底看起来全黑：将对 SDR 屏也尝试 Desktop Duplication。");
 
+        bool enumerated = ForEachOutput(
+            diag,
+            factoryFailureMessage: "CreateDXGIFactory1 失败：返回全黑画布。",
+            topLevelFailurePrefix: "顶层异常",
+            outputFailureMessage: static (adapterIndex, outputIndex, ex) =>
+                $"adapter#{adapterIndex} output#{outputIndex} 异常：{ex.GetType().Name} {ex.Message}（保留当前基底）。",
+            handleOutput: (device, context, output, adapterIndex, outputIndex) =>
+                CaptureOneOutput(device, context, output, vs, canvas, canvasW, canvasH,
+                    gdiBaseHasVisibleContent, captureSdrWithDesktopDuplication,
+                    sdrAcquireTotalBudgetMs, hdrSdrWhiteNits, hdrPeakNits,
+                    diag, adapterIndex, outputIndex));
+        if (!enumerated)
+        {
+            SetLastDiagnostics(diag);
+            return new CapturedImage(canvasW, canvasH, canvas);
+        }
+
+        SetLastDiagnostics(diag);
+        return new CapturedImage(canvasW, canvasH, canvas);
+    }
+
+    /// <summary>
+    /// 抓取虚拟桌面坐标系中的指定区域。相比 <see cref="CaptureVirtualScreenHdrAware"/>，本方法只为
+    /// 目标区域分配 BGRA 画布，并且 Desktop Duplication 帧只复制与目标区域相交的子矩形，适合 GIF 连续抓帧。
+    /// </summary>
+    public static CapturedImage CaptureRegionHdrAware(
+        int x,
+        int y,
+        int width,
+        int height,
+        bool captureSdrWithDesktopDuplication = false,
+        int sdrAcquireTotalBudgetMs = 360,
+        double hdrSdrWhiteNits = ToneMapper.DefaultSdrWhiteNits,
+        double hdrPeakNits = ToneMapper.DefaultHdrPeakNits)
+    {
+        if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+
+        var diag = new List<string>();
+        var vs = VirtualScreenInfo.Get();
+        if (x < vs.X || y < vs.Y || x + width > vs.Right || y + height > vs.Bottom)
+            throw new InvalidOperationException("HDR 区域抓取范围已超出当前虚拟桌面。");
+
+        byte[] canvas = BuildGdiRegionCanvas(x, y, width, height, diag);
+        bool gdiBaseHasVisibleContent = CapturedImage.HasVisibleContent(width, height, canvas);
+        if (!gdiBaseHasVisibleContent)
+            diag.Add("GDI 区域基底看起来全黑：将对 SDR 屏也尝试 Desktop Duplication。");
+
+        bool enumerated = ForEachOutput(
+            diag,
+            factoryFailureMessage: "CreateDXGIFactory1 失败：返回 GDI 区域基底。",
+            topLevelFailurePrefix: "区域顶层异常",
+            outputFailureMessage: static (adapterIndex, outputIndex, ex) =>
+                $"adapter#{adapterIndex} output#{outputIndex} 区域异常：{ex.GetType().Name} {ex.Message}（保留当前基底）。",
+            handleOutput: (device, context, output, adapterIndex, outputIndex) =>
+                CaptureOneOutputRegion(device, context, output,
+                    x, y, width, height, canvas,
+                    gdiBaseHasVisibleContent, captureSdrWithDesktopDuplication,
+                    sdrAcquireTotalBudgetMs, hdrSdrWhiteNits, hdrPeakNits,
+                    diag, adapterIndex, outputIndex));
+        if (!enumerated)
+        {
+            SetLastDiagnostics(diag);
+            return new CapturedImage(width, height, canvas);
+        }
+
+        SetLastDiagnostics(diag);
+        return new CapturedImage(width, height, canvas);
+    }
+
+    /// <summary>
+    /// 为连续区域抓帧创建可复用的 Desktop Duplication 会话。适合 GIF 录制这类重复抓取同一区域的场景；
+    /// GDI 基底仍然逐帧刷新，DD 只复用昂贵的 factory/device/duplication 资源。
+    /// </summary>
+    public static RegionCaptureSession CreateRegionCaptureSession(
+        int x,
+        int y,
+        int width,
+        int height,
+        bool captureSdrWithDesktopDuplication = false,
+        int sdrAcquireTotalBudgetMs = 360,
+        double hdrSdrWhiteNits = ToneMapper.DefaultSdrWhiteNits,
+        double hdrPeakNits = ToneMapper.DefaultHdrPeakNits)
+    {
+        if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+
+        var vs = VirtualScreenInfo.Get();
+        if (x < vs.X || y < vs.Y || x + width > vs.Right || y + height > vs.Bottom)
+            throw new InvalidOperationException("HDR 区域抓取范围已超出当前虚拟桌面。");
+
+        var diagnostics = new List<string>();
+        var outputs = new List<RegionOutputCapture>();
         IDXGIFactory1? factory = null;
         try
         {
             if (DXGI.CreateDXGIFactory1(out factory).Failure || factory is null)
             {
-                diag.Add("CreateDXGIFactory1 失败：返回全黑画布。");
-                LastDiagnostics = diag;
-                return new CapturedImage(canvasW, canvasH, canvas);
+                diagnostics.Add("CreateDXGIFactory1 失败：区域连续抓帧会话仅使用 GDI 基底。");
+                return new RegionCaptureSession(
+                    x, y, width, height,
+                    captureSdrWithDesktopDuplication,
+                    sdrAcquireTotalBudgetMs,
+                    hdrSdrWhiteNits,
+                    hdrPeakNits,
+                    outputs,
+                    diagnostics);
+            }
+
+            for (uint adapterIndex = 0; ; adapterIndex++)
+            {
+                if (factory.EnumAdapters1(adapterIndex, out IDXGIAdapter1? adapter).Failure || adapter is null)
+                    break;
+
+                try
+                {
+                    for (uint outputIndex = 0; ; outputIndex++)
+                    {
+                        if (adapter.EnumOutputs(outputIndex, out IDXGIOutput? output).Failure || output is null)
+                            break;
+
+                        bool ownershipTransferred = false;
+                        IDXGIOutput6? output6 = null;
+                        ID3D11Device? device = null;
+                        ID3D11DeviceContext? context = null;
+                        try
+                        {
+                            output6 = output.QueryInterface<IDXGIOutput6>();
+                            OutputDescription1 desc1 = output6.Description1;
+                            if (!desc1.AttachedToDesktop)
+                                continue;
+
+                            RawRect rect = desc1.DesktopCoordinates;
+                            int sx = rect.Left, sy = rect.Top;
+                            int sw = rect.Right - rect.Left;
+                            int sh = rect.Bottom - rect.Top;
+                            if (sw <= 0 || sh <= 0)
+                                continue;
+
+                            int ix0 = Math.Max(x, sx);
+                            int iy0 = Math.Max(y, sy);
+                            int ix1 = Math.Min(x + width, sx + sw);
+                            int iy1 = Math.Min(y + height, sy + sh);
+                            if (ix1 <= ix0 || iy1 <= iy0)
+                                continue;
+
+                            var featureLevels = new[]
+                            {
+                                FeatureLevel.Level_11_1, FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0,
+                            };
+                            Result devRes = D3D11.D3D11CreateDevice(
+                                adapter,
+                                DriverType.Unknown,
+                                DeviceCreationFlags.BgraSupport,
+                                featureLevels,
+                                out device,
+                                out context);
+                            if (devRes.Failure || device is null || context is null)
+                            {
+                                diagnostics.Add($"adapter#{adapterIndex} output#{outputIndex} D3D11CreateDevice 失败（0x{devRes.Code:X8}），跳过该输出。");
+                                continue;
+                            }
+
+                            var outputCapture = new RegionOutputCapture(
+                                device,
+                                context,
+                                output,
+                                output6,
+                                outputIndex,
+                                isHdr: desc1.ColorSpace == ColorSpaceType.RgbFullG2084NoneP2020,
+                                sourceX: ix0 - sx,
+                                sourceY: iy0 - sy,
+                                copyWidth: ix1 - ix0,
+                                copyHeight: iy1 - iy0,
+                                destX: ix0 - x,
+                                destY: iy0 - y);
+                            outputCapture.RecreateDuplication(diagnostics);
+                            outputs.Add(outputCapture);
+                            ownershipTransferred = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            diagnostics.Add($"adapter#{adapterIndex} output#{outputIndex} 区域连续抓帧会话初始化失败：{ex.GetType().Name} {ex.Message}。");
+                        }
+                        finally
+                        {
+                            if (!ownershipTransferred)
+                            {
+                                context?.Dispose();
+                                device?.Dispose();
+                                output6?.Dispose();
+                                output.Dispose();
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    adapter.Dispose();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            diagnostics.Add($"区域连续抓帧会话顶层异常：{ex.GetType().Name} {ex.Message}（后续仅使用 GDI 基底）。");
+        }
+        finally
+        {
+            factory?.Dispose();
+        }
+
+        return new RegionCaptureSession(
+            x, y, width, height,
+            captureSdrWithDesktopDuplication,
+            sdrAcquireTotalBudgetMs,
+            hdrSdrWhiteNits,
+            hdrPeakNits,
+            outputs,
+            diagnostics);
+    }
+
+    private static void SetLastDiagnostics(List<string> diagnostics)
+        => _lastDiagnostics = diagnostics.Count == 0 ? Array.Empty<string>() : diagnostics.ToArray();
+
+    private delegate void OutputCaptureHandler(
+        ID3D11Device device,
+        ID3D11DeviceContext context,
+        IDXGIOutput output,
+        uint adapterIndex,
+        uint outputIndex);
+
+    private static bool ForEachOutput(
+        List<string> diag,
+        string factoryFailureMessage,
+        string topLevelFailurePrefix,
+        Func<uint, uint, Exception, string> outputFailureMessage,
+        OutputCaptureHandler handleOutput)
+    {
+        IDXGIFactory1? factory = null;
+        try
+        {
+            if (DXGI.CreateDXGIFactory1(out factory).Failure || factory is null)
+            {
+                diag.Add(factoryFailureMessage);
+                return false;
             }
 
             for (uint adapterIndex = 0; ; adapterIndex++)
@@ -104,14 +345,17 @@ public static class DuplicationCapture
                 ID3D11DeviceContext? context = null;
                 try
                 {
-                    // 用具体 adapter 时 DriverType 必须为 Unknown。BgraSupport 便于与 GDI/D2D 互操作。
                     var featureLevels = new[]
                     {
                         FeatureLevel.Level_11_1, FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0,
                     };
                     Result devRes = D3D11.D3D11CreateDevice(
-                        adapter, DriverType.Unknown, DeviceCreationFlags.BgraSupport,
-                        featureLevels, out device, out context);
+                        adapter,
+                        DriverType.Unknown,
+                        DeviceCreationFlags.BgraSupport,
+                        featureLevels,
+                        out device,
+                        out context);
                     if (devRes.Failure || device is null || context is null)
                     {
                         diag.Add($"adapter#{adapterIndex} D3D11CreateDevice 失败（0x{devRes.Code:X8}），跳过该适配器。");
@@ -125,14 +369,11 @@ public static class DuplicationCapture
 
                         try
                         {
-                            CaptureOneOutput(device, context, output, vs, canvas, canvasW, canvasH,
-                                gdiBaseHasVisibleContent, captureSdrWithDesktopDuplication,
-                                sdrAcquireTotalBudgetMs, hdrSdrWhiteNits, hdrPeakNits,
-                                diag, adapterIndex, outputIndex);
+                            handleOutput(device, context, output, adapterIndex, outputIndex);
                         }
                         catch (Exception ex)
                         {
-                            diag.Add($"adapter#{adapterIndex} output#{outputIndex} 异常：{ex.GetType().Name} {ex.Message}（保留当前基底）。");
+                            diag.Add(outputFailureMessage(adapterIndex, outputIndex, ex));
                         }
                         finally
                         {
@@ -150,15 +391,14 @@ public static class DuplicationCapture
         }
         catch (Exception ex)
         {
-            diag.Add($"顶层异常：{ex.GetType().Name} {ex.Message}（返回已合成部分）。");
+            diag.Add($"{topLevelFailurePrefix}：{ex.GetType().Name} {ex.Message}（返回已合成部分）。");
         }
         finally
         {
             factory?.Dispose();
         }
 
-        LastDiagnostics = diag;
-        return new CapturedImage(canvasW, canvasH, canvas);
+        return true;
     }
 
     /// <summary>
@@ -179,6 +419,26 @@ public static class DuplicationCapture
         {
             diag.Add($"GDI 基底抓取失败（{ex.GetType().Name} {ex.Message}），回退全黑基底。");
         }
+        var black = new byte[len];
+        for (long i = 3; i < black.LongLength; i += 4) black[i] = 255;
+        return black;
+    }
+
+    private static byte[] BuildGdiRegionCanvas(int x, int y, int width, int height, List<string> diag)
+    {
+        long len = (long)width * height * 4;
+        try
+        {
+            var gdi = GdiCapture.CaptureRegion(x, y, width, height);
+            if (gdi.Width == width && gdi.Height == height && gdi.PixelsBgra.LongLength == len)
+                return gdi.PixelsBgra;
+            diag.Add($"GDI 区域基底尺寸不符（{gdi.Width}x{gdi.Height} vs {width}x{height}），回退全黑基底。");
+        }
+        catch (Exception ex)
+        {
+            diag.Add($"GDI 区域基底抓取失败（{ex.GetType().Name} {ex.Message}），回退全黑基底。");
+        }
+
         var black = new byte[len];
         for (long i = 3; i < black.LongLength; i += 4) black[i] = 255;
         return black;
@@ -339,6 +599,446 @@ public static class DuplicationCapture
         }
     }
 
+    private static void CaptureOneOutputRegion(
+        ID3D11Device device,
+        ID3D11DeviceContext context,
+        IDXGIOutput output,
+        int regionX,
+        int regionY,
+        int regionWidth,
+        int regionHeight,
+        byte[] canvas,
+        bool gdiBaseHasVisibleContent,
+        bool captureSdrWithDesktopDuplication,
+        int sdrAcquireTotalBudgetMs,
+        double hdrSdrWhiteNits,
+        double hdrPeakNits,
+        List<string> diag,
+        uint adapterIndex,
+        uint outputIndex)
+    {
+        IDXGIOutput6? output6;
+        try
+        {
+            output6 = output.QueryInterface<IDXGIOutput6>();
+        }
+        catch (Exception ex)
+        {
+            diag.Add($"output#{outputIndex} 不支持 IDXGIOutput6（{ex.GetType().Name}），跳过。");
+            return;
+        }
+
+        IDXGIOutputDuplication? duplication = null;
+        try
+        {
+            OutputDescription1 desc1 = output6.Description1;
+            if (!desc1.AttachedToDesktop)
+                return;
+
+            RawRect rect = desc1.DesktopCoordinates;
+            int sx = rect.Left, sy = rect.Top;
+            int sw = rect.Right - rect.Left;
+            int sh = rect.Bottom - rect.Top;
+            if (sw <= 0 || sh <= 0)
+                return;
+
+            int ix0 = Math.Max(regionX, sx);
+            int iy0 = Math.Max(regionY, sy);
+            int ix1 = Math.Min(regionX + regionWidth, sx + sw);
+            int iy1 = Math.Min(regionY + regionHeight, sy + sh);
+            if (ix1 <= ix0 || iy1 <= iy0)
+                return;
+
+            int sourceX = ix0 - sx;
+            int sourceY = iy0 - sy;
+            int copyWidth = ix1 - ix0;
+            int copyHeight = iy1 - iy0;
+            int destX = ix0 - regionX;
+            int destY = iy0 - regionY;
+            bool isHdr = desc1.ColorSpace == ColorSpaceType.RgbFullG2084NoneP2020;
+
+            if (!isHdr && gdiBaseHasVisibleContent && !captureSdrWithDesktopDuplication)
+                return;
+
+            duplication = TryCreateDuplication(device, output, output6, diag, outputIndex);
+            if (duplication is null)
+                return;
+
+            var watch = Stopwatch.StartNew();
+            bool sawPlaceholderFrame = false;
+            bool sawBlackFrame = false;
+            int timeouts = 0;
+            int accessLostRecreates = 0;
+            int acquireBudgetMs = isHdr
+                ? AcquireTotalBudgetMs
+                : Math.Clamp(sdrAcquireTotalBudgetMs, AcquireTimeoutMs, AcquireTotalBudgetMs);
+
+            for (int attempt = 1; attempt <= AcquireMaxAttempts && watch.ElapsedMilliseconds <= acquireBudgetMs; attempt++)
+            {
+                IDXGIResource? frameResource = null;
+                Result ar = duplication.AcquireNextFrame(AcquireTimeoutMs, out OutduplFrameInfo frameInfo, out frameResource);
+                if (ar == Vortice.DXGI.ResultCode.WaitTimeout)
+                {
+                    frameResource?.Dispose();
+                    timeouts++;
+                    continue;
+                }
+                if (ar.Failure)
+                {
+                    frameResource?.Dispose();
+                    if (IsDxgiError(ar, DxgiErrorAccessLost))
+                    {
+                        if (accessLostRecreates == 0)
+                        {
+                            accessLostRecreates++;
+                            diag.Add($"output#{outputIndex} Desktop Duplication access lost（0x{ar.Code:X8}），重建 duplication 后重试。");
+                            duplication.Dispose();
+                            duplication = TryCreateDuplication(device, output, output6, diag, outputIndex);
+                            if (duplication is null)
+                                return;
+                            continue;
+                        }
+
+                        diag.Add($"output#{outputIndex} Desktop Duplication access lost 重建后仍失败（0x{ar.Code:X8}），保留当前区域基底。");
+                        return;
+                    }
+
+                    diag.Add($"output#{outputIndex} AcquireNextFrame 失败（0x{ar.Code:X8}），保留当前区域基底。");
+                    return;
+                }
+                if (frameResource is null)
+                {
+                    timeouts++;
+                    continue;
+                }
+
+                try
+                {
+                    if (frameInfo.ProtectedContentMaskedOut)
+                        diag.Add($"output#{outputIndex} 含受保护内容（已被屏蔽为黑）。");
+
+                    if (frameInfo.LastPresentTime == 0)
+                    {
+                        if (!sawPlaceholderFrame)
+                            diag.Add($"output#{outputIndex} 丢弃 LastPresentTime=0 的占位帧。");
+                        sawPlaceholderFrame = true;
+                        continue;
+                    }
+
+                    if (!TryProcessFrameRegion(device, context, frameResource, isHdr,
+                            sourceX, sourceY, copyWidth, copyHeight,
+                            hdrSdrWhiteNits, hdrPeakNits,
+                            out byte[] patch, out int patchW, out int patchH, diag, outputIndex))
+                    {
+                        return;
+                    }
+
+                    if (!CapturedImage.HasVisibleContent(patchW, patchH, patch))
+                    {
+                        if (!sawBlackFrame)
+                        {
+                            diag.Add($"output#{outputIndex} 丢弃区域全黑帧（可能是 Desktop Duplication 空帧或受保护/远程显示内容）。");
+                            sawBlackFrame = true;
+                        }
+                        continue;
+                    }
+
+                    BlitInto(patch, patchW, patchH, destX, destY, canvas, regionWidth, regionHeight);
+                    return;
+                }
+                finally
+                {
+                    frameResource.Dispose();
+                    duplication.ReleaseFrame();
+                }
+            }
+
+            diag.Add($"output#{outputIndex} 区域未获得有效非黑帧（timeouts={timeouts}，elapsed={watch.ElapsedMilliseconds}ms），保留当前区域基底。");
+        }
+        finally
+        {
+            duplication?.Dispose();
+            output6.Dispose();
+        }
+    }
+
+    public sealed class RegionCaptureSession : IDisposable
+    {
+        private readonly int _x;
+        private readonly int _y;
+        private readonly int _width;
+        private readonly int _height;
+        private readonly bool _captureSdrWithDesktopDuplication;
+        private readonly int _sdrAcquireTotalBudgetMs;
+        private readonly double _hdrSdrWhiteNits;
+        private readonly double _hdrPeakNits;
+        private readonly List<RegionOutputCapture> _outputs;
+        private readonly IReadOnlyList<string> _constructionDiagnostics;
+        private bool _disposed;
+
+        internal RegionCaptureSession(
+            int x,
+            int y,
+            int width,
+            int height,
+            bool captureSdrWithDesktopDuplication,
+            int sdrAcquireTotalBudgetMs,
+            double hdrSdrWhiteNits,
+            double hdrPeakNits,
+            List<RegionOutputCapture> outputs,
+            List<string> constructionDiagnostics)
+        {
+            _x = x;
+            _y = y;
+            _width = width;
+            _height = height;
+            _captureSdrWithDesktopDuplication = captureSdrWithDesktopDuplication;
+            _sdrAcquireTotalBudgetMs = sdrAcquireTotalBudgetMs;
+            _hdrSdrWhiteNits = hdrSdrWhiteNits;
+            _hdrPeakNits = hdrPeakNits;
+            _outputs = outputs;
+            _constructionDiagnostics = constructionDiagnostics.Count == 0
+                ? Array.Empty<string>()
+                : constructionDiagnostics.ToArray();
+        }
+
+        public CapturedImage Capture()
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            var diag = _constructionDiagnostics.Count == 0
+                ? new List<string>()
+                : new List<string>(_constructionDiagnostics);
+            byte[] canvas = BuildGdiRegionCanvas(_x, _y, _width, _height, diag);
+            bool gdiBaseHasVisibleContent = CapturedImage.HasVisibleContent(_width, _height, canvas);
+            if (!gdiBaseHasVisibleContent)
+                diag.Add("GDI 区域基底看起来全黑：将对 SDR 屏也尝试 Desktop Duplication。");
+
+            foreach (var output in _outputs)
+            {
+                try
+                {
+                    output.CaptureInto(
+                        canvas,
+                        _width,
+                        _height,
+                        gdiBaseHasVisibleContent,
+                        _captureSdrWithDesktopDuplication,
+                        _sdrAcquireTotalBudgetMs,
+                        _hdrSdrWhiteNits,
+                        _hdrPeakNits,
+                        diag);
+                }
+                catch (Exception ex)
+                {
+                    diag.Add($"output#{output.OutputIndex} 区域连续抓帧异常：{ex.GetType().Name} {ex.Message}（保留当前区域基底）。");
+                }
+            }
+
+            SetLastDiagnostics(diag);
+            return new CapturedImage(_width, _height, canvas);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            foreach (var output in _outputs)
+                output.Dispose();
+            _outputs.Clear();
+            _disposed = true;
+        }
+    }
+
+    internal sealed class RegionOutputCapture : IDisposable
+    {
+        private readonly ID3D11Device _device;
+        private readonly ID3D11DeviceContext _context;
+        private readonly IDXGIOutput _output;
+        private readonly IDXGIOutput6 _output6;
+        private readonly bool _isHdr;
+        private readonly int _sourceX;
+        private readonly int _sourceY;
+        private readonly int _copyWidth;
+        private readonly int _copyHeight;
+        private readonly int _destX;
+        private readonly int _destY;
+        private IDXGIOutputDuplication? _duplication;
+        private bool _disposed;
+
+        public uint OutputIndex { get; }
+
+        public RegionOutputCapture(
+            ID3D11Device device,
+            ID3D11DeviceContext context,
+            IDXGIOutput output,
+            IDXGIOutput6 output6,
+            uint outputIndex,
+            bool isHdr,
+            int sourceX,
+            int sourceY,
+            int copyWidth,
+            int copyHeight,
+            int destX,
+            int destY)
+        {
+            _device = device;
+            _context = context;
+            _output = output;
+            _output6 = output6;
+            OutputIndex = outputIndex;
+            _isHdr = isHdr;
+            _sourceX = sourceX;
+            _sourceY = sourceY;
+            _copyWidth = copyWidth;
+            _copyHeight = copyHeight;
+            _destX = destX;
+            _destY = destY;
+        }
+
+        public bool RecreateDuplication(List<string> diag)
+        {
+            _duplication?.Dispose();
+            _duplication = TryCreateDuplication(_device, _output, _output6, diag, OutputIndex);
+            return _duplication is not null;
+        }
+
+        public void CaptureInto(
+            byte[] canvas,
+            int regionWidth,
+            int regionHeight,
+            bool gdiBaseHasVisibleContent,
+            bool captureSdrWithDesktopDuplication,
+            int sdrAcquireTotalBudgetMs,
+            double hdrSdrWhiteNits,
+            double hdrPeakNits,
+            List<string> diag)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            if (!_isHdr && gdiBaseHasVisibleContent && !captureSdrWithDesktopDuplication)
+                return;
+
+            if (_duplication is null && !RecreateDuplication(diag))
+                return;
+
+            var watch = Stopwatch.StartNew();
+            bool sawPlaceholderFrame = false;
+            bool sawBlackFrame = false;
+            int timeouts = 0;
+            int accessLostRecreates = 0;
+            int acquireBudgetMs = _isHdr
+                ? AcquireTotalBudgetMs
+                : Math.Clamp(sdrAcquireTotalBudgetMs, AcquireTimeoutMs, AcquireTotalBudgetMs);
+
+            for (int attempt = 1; attempt <= AcquireMaxAttempts && watch.ElapsedMilliseconds <= acquireBudgetMs; attempt++)
+            {
+                IDXGIResource? frameResource = null;
+                Result ar = _duplication!.AcquireNextFrame(AcquireTimeoutMs, out OutduplFrameInfo frameInfo, out frameResource);
+                if (ar == Vortice.DXGI.ResultCode.WaitTimeout)
+                {
+                    frameResource?.Dispose();
+                    timeouts++;
+                    continue;
+                }
+                if (ar.Failure)
+                {
+                    frameResource?.Dispose();
+                    if (IsDxgiError(ar, DxgiErrorAccessLost))
+                    {
+                        if (accessLostRecreates == 0)
+                        {
+                            accessLostRecreates++;
+                            diag.Add($"output#{OutputIndex} Desktop Duplication access lost（0x{ar.Code:X8}），重建连续抓帧 duplication 后重试。");
+                            if (!RecreateDuplication(diag))
+                                return;
+                            continue;
+                        }
+
+                        diag.Add($"output#{OutputIndex} Desktop Duplication access lost 重建后仍失败（0x{ar.Code:X8}），保留当前区域基底。");
+                        return;
+                    }
+
+                    diag.Add($"output#{OutputIndex} AcquireNextFrame 失败（0x{ar.Code:X8}），保留当前区域基底。");
+                    return;
+                }
+                if (frameResource is null)
+                {
+                    timeouts++;
+                    continue;
+                }
+
+                try
+                {
+                    if (frameInfo.ProtectedContentMaskedOut)
+                        diag.Add($"output#{OutputIndex} 含受保护内容（已被屏蔽为黑）。");
+
+                    if (frameInfo.LastPresentTime == 0)
+                    {
+                        if (!sawPlaceholderFrame)
+                            diag.Add($"output#{OutputIndex} 丢弃 LastPresentTime=0 的占位帧。");
+                        sawPlaceholderFrame = true;
+                        continue;
+                    }
+
+                    if (!TryProcessFrameRegion(
+                            _device,
+                            _context,
+                            frameResource,
+                            _isHdr,
+                            _sourceX,
+                            _sourceY,
+                            _copyWidth,
+                            _copyHeight,
+                            hdrSdrWhiteNits,
+                            hdrPeakNits,
+                            out byte[] patch,
+                            out int patchW,
+                            out int patchH,
+                            diag,
+                            OutputIndex))
+                    {
+                        return;
+                    }
+
+                    if (!CapturedImage.HasVisibleContent(patchW, patchH, patch))
+                    {
+                        if (!sawBlackFrame)
+                        {
+                            diag.Add($"output#{OutputIndex} 丢弃区域全黑帧（可能是 Desktop Duplication 空帧或受保护/远程显示内容）。");
+                            sawBlackFrame = true;
+                        }
+                        continue;
+                    }
+
+                    BlitInto(patch, patchW, patchH, _destX, _destY, canvas, regionWidth, regionHeight);
+                    return;
+                }
+                finally
+                {
+                    frameResource.Dispose();
+                    _duplication.ReleaseFrame();
+                }
+            }
+
+            diag.Add($"output#{OutputIndex} 区域未获得有效非黑帧（timeouts={timeouts}，elapsed={watch.ElapsedMilliseconds}ms），保留当前区域基底。");
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            _duplication?.Dispose();
+            _output6.Dispose();
+            _output.Dispose();
+            _context.Dispose();
+            _device.Dispose();
+            _disposed = true;
+        }
+    }
+
     private static bool IsDxgiError(Result result, uint code)
         => unchecked((uint)result.Code) == code;
 
@@ -467,6 +1167,107 @@ public static class DuplicationCapture
         }
     }
 
+    private static bool TryProcessFrameRegion(
+        ID3D11Device device,
+        ID3D11DeviceContext context,
+        IDXGIResource frameResource,
+        bool isHdr,
+        int sourceX,
+        int sourceY,
+        int width,
+        int height,
+        double hdrSdrWhiteNits,
+        double hdrPeakNits,
+        out byte[] bgra,
+        out int texW,
+        out int texH,
+        List<string> diag,
+        uint outputIndex)
+    {
+        bgra = Array.Empty<byte>();
+        texW = 0;
+        texH = 0;
+
+        ID3D11Texture2D? frameTex = frameResource.QueryInterface<ID3D11Texture2D>();
+        ID3D11Texture2D? staging = null;
+        try
+        {
+            Texture2DDescription srcDesc = frameTex.Description;
+            int srcW = (int)srcDesc.Width;
+            int srcH = (int)srcDesc.Height;
+            if (sourceX < 0 || sourceY < 0 || width <= 0 || height <= 0 || sourceX >= srcW || sourceY >= srcH)
+            {
+                diag.Add($"output#{outputIndex} 区域源矩形无效：({sourceX},{sourceY},{width},{height}) / {srcW}x{srcH}。");
+                return false;
+            }
+
+            texW = Math.Min(width, srcW - sourceX);
+            texH = Math.Min(height, srcH - sourceY);
+            if (texW <= 0 || texH <= 0)
+                return false;
+
+            var stagingDesc = new Texture2DDescription
+            {
+                Width = (uint)texW,
+                Height = (uint)texH,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = srcDesc.Format,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read,
+                MiscFlags = ResourceOptionFlags.None,
+            };
+            staging = device.CreateTexture2D(in stagingDesc);
+
+            var sourceBox = new Box(sourceX, sourceY, 0, sourceX + texW, sourceY + texH, 1);
+            context.CopySubresourceRegion(staging, 0, 0, 0, 0, frameTex, 0, sourceBox);
+
+            Result mapRes = context.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None, out MappedSubresource map);
+            if (mapRes.Failure || map.DataPointer == IntPtr.Zero)
+            {
+                diag.Add($"output#{outputIndex} 区域 Map 失败（0x{mapRes.Code:X8}），保留当前基底。");
+                return false;
+            }
+
+            try
+            {
+                if (srcDesc.Format == Format.R16G16B16A16_Float)
+                {
+                    bgra = MapScRgbFp16ToSdrBgra(
+                        map.DataPointer, (int)map.RowPitch, texW, texH,
+                        hdrSdrWhiteNits, hdrPeakNits,
+                        inputIsRec2020: false);
+                }
+                else if (srcDesc.Format is Format.B8G8R8A8_UNorm or Format.B8G8R8A8_UNorm_SRgb)
+                {
+                    bgra = ReadBgra8(map.DataPointer, (int)map.RowPitch, texW, texH);
+                }
+                else if (srcDesc.Format is Format.R8G8B8A8_UNorm or Format.R8G8B8A8_UNorm_SRgb)
+                {
+                    bgra = ReadRgba8AsBgra(map.DataPointer, (int)map.RowPitch, texW, texH);
+                }
+                else
+                {
+                    diag.Add($"output#{outputIndex} 不支持的 Desktop Duplication 区域帧格式：{srcDesc.Format}，保留当前基底。");
+                    return false;
+                }
+            }
+            finally
+            {
+                context.Unmap(staging, 0);
+            }
+
+            return true;
+        }
+        finally
+        {
+            staging?.Dispose();
+            frameTex.Dispose();
+        }
+    }
+
     private static unsafe byte[] MapScRgbFp16ToSdrBgra(
         IntPtr dataPtr,
         int rowPitch,
@@ -481,11 +1282,11 @@ public static class DuplicationCapture
         if (w < 0) throw new ArgumentOutOfRangeException(nameof(w));
         if (h < 0) throw new ArgumentOutOfRangeException(nameof(h));
 
-        long componentCount = (long)w * h * 4;
-        if (componentCount > int.MaxValue)
-            throw new InvalidOperationException($"HDR 帧过大，无法展开为 scRGB 缓冲：{w}x{h}。");
+        long byteCount = (long)w * h * 4;
+        if (byteCount > int.MaxValue)
+            throw new InvalidOperationException($"HDR 帧过大，无法展开为 SDR 缓冲：{w}x{h}。");
 
-        var scRgba = new float[(int)componentCount];
+        var dst = new byte[(int)byteCount];
         byte* basePtr = (byte*)dataPtr;
         for (int y = 0; y < h; y++)
         {
@@ -495,20 +1296,23 @@ public static class DuplicationCapture
             {
                 int sp = x * 4;
                 int dp = dstRow + sp;
-                scRgba[dp + 0] = (float)BitConverter.UInt16BitsToHalf(row[sp + 0]);
-                scRgba[dp + 1] = (float)BitConverter.UInt16BitsToHalf(row[sp + 1]);
-                scRgba[dp + 2] = (float)BitConverter.UInt16BitsToHalf(row[sp + 2]);
-                scRgba[dp + 3] = (float)BitConverter.UInt16BitsToHalf(row[sp + 3]);
+                var (b, g, r, a) = ToneMapper.MapScRgbPixelToSdrBgra(
+                    (float)BitConverter.UInt16BitsToHalf(row[sp + 0]),
+                    (float)BitConverter.UInt16BitsToHalf(row[sp + 1]),
+                    (float)BitConverter.UInt16BitsToHalf(row[sp + 2]),
+                    (float)BitConverter.UInt16BitsToHalf(row[sp + 3]),
+                    sdrWhiteNits,
+                    hdrPeakNits,
+                    inputIsRec2020);
+
+                dst[dp] = b;
+                dst[dp + 1] = g;
+                dst[dp + 2] = r;
+                dst[dp + 3] = a;
             }
         }
 
-        return new ToneMapper().MapToSdrBgra(
-            scRgba,
-            w,
-            h,
-            sdrWhiteNits,
-            hdrPeakNits,
-            inputIsRec2020);
+        return dst;
     }
 
     /// <summary>

@@ -6,7 +6,7 @@ namespace WinSnap.Core.Commands;
 /// </summary>
 public sealed class UndoRedoStack
 {
-    private readonly Stack<IUndoableCommand> _undo = new();
+    private readonly LinkedList<IUndoableCommand> _undo = new();
     private readonly Stack<IUndoableCommand> _redo = new();
 
     /// <summary>可选容量上限（&gt;0 时生效）：超出后丢弃最旧的 undo 记录。</summary>
@@ -38,7 +38,7 @@ public sealed class UndoRedoStack
     {
         ArgumentNullException.ThrowIfNull(command);
         command.Do();
-        _undo.Push(command);
+        _undo.AddLast(command);
         _redo.Clear();
         TrimToCapacity();
         StateChanged?.Invoke();
@@ -50,7 +50,8 @@ public sealed class UndoRedoStack
     public bool Undo()
     {
         if (_undo.Count == 0) return false;
-        var cmd = _undo.Pop();
+        var cmd = _undo.Last!.Value;
+        _undo.RemoveLast();
         cmd.Undo();
         _redo.Push(cmd);
         StateChanged?.Invoke();
@@ -65,7 +66,7 @@ public sealed class UndoRedoStack
         if (_redo.Count == 0) return false;
         var cmd = _redo.Pop();
         cmd.Do();
-        _undo.Push(cmd);
+        _undo.AddLast(cmd);
         StateChanged?.Invoke();
         return true;
     }
@@ -82,13 +83,7 @@ public sealed class UndoRedoStack
     private void TrimToCapacity()
     {
         if (Capacity <= 0 || _undo.Count <= Capacity) return;
-        // Stack 无法从底部弹出，重建：保留最近 Capacity 个（栈顶为最新）
-        var keep = new IUndoableCommand[Capacity];
-        for (int i = 0; i < Capacity; i++)
-            keep[i] = _undo.Pop(); // keep[0] 最新
-        _undo.Clear();
-        // 反向压回，使最新仍在栈顶
-        for (int i = Capacity - 1; i >= 0; i--)
-            _undo.Push(keep[i]);
+        while (_undo.Count > Capacity)
+            _undo.RemoveFirst();
     }
 }

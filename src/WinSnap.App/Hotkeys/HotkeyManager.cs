@@ -14,9 +14,9 @@ public sealed class HotkeyManager : IDisposable
     private const int HwndMessage = -3;
     private const int CaptureHotkeyId = 1;
     private const int PinHotkeyId = 2;
-    private const int ScrollCaptureHotkeyId = 3;
+    private const int GifCaptureHotkeyId = 3;
 
-    private static readonly int[] HotkeyIds = [CaptureHotkeyId, PinHotkeyId, ScrollCaptureHotkeyId];
+    private static readonly int[] HotkeyIds = [CaptureHotkeyId, PinHotkeyId, GifCaptureHotkeyId];
 
     private readonly Dictionary<int, string> _currentHotkeys = new();
     private HwndSource? _source;
@@ -27,8 +27,8 @@ public sealed class HotkeyManager : IDisposable
     /// <summary>钉图热键被按下。</summary>
     public event Action? PinTriggered;
 
-    /// <summary>长截图热键被按下。</summary>
-    public event Action? ScrollCaptureTriggered;
+    /// <summary>GIF 录制热键被按下。</summary>
+    public event Action? GifCaptureTriggered;
 
     /// <summary>创建 message-only 窗口并注册配置中的全局热键。返回是否全部注册成功。</summary>
     public bool Initialize(AppSettings settings)
@@ -37,8 +37,8 @@ public sealed class HotkeyManager : IDisposable
         EnsureSource();
         bool captureOk = TryRegisterHotkey(CaptureHotkeyId, "截图", settings.CaptureHotkey, required: true);
         bool pinOk = TryRegisterHotkey(PinHotkeyId, "钉图", settings.PinHotkey, required: false);
-        bool scrollOk = TryRegisterHotkey(ScrollCaptureHotkeyId, "长截图", settings.ScrollCaptureHotkey, required: false);
-        return captureOk && pinOk && scrollOk;
+        bool gifOk = TryRegisterHotkey(GifCaptureHotkeyId, "GIF 录制", settings.GifCaptureHotkey, required: false);
+        return captureOk && pinOk && gifOk;
     }
 
     /// <summary>兼容旧调用：只注册截图热键。</summary>
@@ -53,10 +53,13 @@ public sealed class HotkeyManager : IDisposable
         => RegisterConfiguredHotkeys(
             hotkey,
             CurrentHotkey(PinHotkeyId),
-            CurrentHotkey(ScrollCaptureHotkeyId));
+            CurrentHotkey(GifCaptureHotkeyId));
 
-    /// <summary>批量重新绑定截图 / 钉图 / 长截图热键；任一失败则恢复旧状态。</summary>
-    public bool RegisterConfiguredHotkeys(string? captureHotkey, string? pinHotkey, string? scrollCaptureHotkey)
+    /// <summary>批量重新绑定截图 / 钉图 / GIF 录制热键；任一失败则恢复旧状态。</summary>
+    public bool RegisterConfiguredHotkeys(
+        string? captureHotkey,
+        string? pinHotkey,
+        string? gifCaptureHotkey)
     {
         if (_source is null)
             return false;
@@ -64,7 +67,7 @@ public sealed class HotkeyManager : IDisposable
         var snapshot = new Dictionary<int, string>(_currentHotkeys);
         bool ok = TryRegisterHotkey(CaptureHotkeyId, "截图", captureHotkey, required: true)
             && TryRegisterHotkey(PinHotkeyId, "钉图", pinHotkey, required: false)
-            && TryRegisterHotkey(ScrollCaptureHotkeyId, "长截图", scrollCaptureHotkey, required: false);
+            && TryRegisterHotkey(GifCaptureHotkeyId, "GIF 录制", gifCaptureHotkey, required: false);
 
         if (ok)
             return true;
@@ -187,16 +190,16 @@ public sealed class HotkeyManager : IDisposable
             case PinHotkeyId:
                 PinTriggered?.Invoke();
                 break;
-            case ScrollCaptureHotkeyId:
-                ScrollCaptureTriggered?.Invoke();
+            case GifCaptureHotkeyId:
+                GifCaptureTriggered?.Invoke();
                 break;
         }
 
         return IntPtr.Zero;
     }
 
-    /// <summary>解析 "Ctrl+Alt+A" 形式的热键。主键支持 A-Z / 0-9 / F1-F24。</summary>
-    private static bool TryParse(string hotkey, out uint modifiers, out uint virtualKey)
+    /// <summary>解析 "Ctrl+Alt+A" 形式的热键。主键支持 A-Z / 0-9 / NumPad0-NumPad9 / F1-F24。</summary>
+    internal static bool TryParse(string hotkey, out uint modifiers, out uint virtualKey)
     {
         modifiers = 0;
         virtualKey = 0;
@@ -224,6 +227,13 @@ public sealed class HotkeyManager : IDisposable
         {
             virtualKey = key[0]; // 'A'-'Z' / '0'-'9' 的虚拟键码等于其 ASCII 值
             return modifiers != 0; // 至少需要一个修饰键
+        }
+        if (key.Length == 7 &&
+            key.StartsWith("NUMPAD", StringComparison.Ordinal) &&
+            key[6] is >= '0' and <= '9')
+        {
+            virtualKey = (uint)(0x60 + key[6] - '0'); // VK_NUMPAD0 = 0x60
+            return modifiers != 0;
         }
         if (key.Length >= 2 && key[0] == 'F' && int.TryParse(key.AsSpan(1), out int fn) && fn is >= 1 and <= 24)
         {

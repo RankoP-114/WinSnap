@@ -27,12 +27,18 @@ public partial class MagnifierControl : UserControl
         int sx = Math.Clamp(px - half, 0, maxX);
         int sy = Math.Clamp(py - half, 0, maxY);
 
-        ZoomImage.Source = new CroppedBitmap(source,
+        var crop = new CroppedBitmap(source,
             new Int32Rect(sx, sy, ZoomSourceSize, ZoomSourceSize));
+        if (crop.CanFreeze)
+            crop.Freeze();
+        ZoomImage.Source = crop;
 
         PosText.Text = $"({px}, {py})";
         ColorText.Text = $"#{color.R:X2}{color.G:X2}{color.B:X2}  {color.R},{color.G},{color.B}";
-        ColorSample.Fill = new SolidColorBrush(color);
+        var brush = new SolidColorBrush(color);
+        if (brush.CanFreeze)
+            brush.Freeze();
+        ColorSample.Fill = brush;
     }
 
     public void Clear()

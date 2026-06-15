@@ -13,6 +13,8 @@ public class SettingsTests
         Assert.Equal(5, settings.GifDefaultDurationSeconds);
         Assert.Equal(3, settings.GifCountdownSeconds);
         Assert.Equal(10, settings.GifFramesPerSecond);
+        Assert.Equal("Ctrl+Alt+G", settings.GifCaptureHotkey);
+        Assert.Equal(string.Empty, settings.ScrollCaptureHotkey);
     }
 
     [Fact]
@@ -34,5 +36,7 @@ public class SettingsTests
         Assert.Equal(5, settings!.GifDefaultDurationSeconds);
         Assert.Equal(3, settings.GifCountdownSeconds);
         Assert.Equal(10, settings.GifFramesPerSecond);
+        Assert.Equal("Ctrl+Alt+G", settings.GifCaptureHotkey);
+        Assert.Equal(string.Empty, settings.ScrollCaptureHotkey);
     }
 }

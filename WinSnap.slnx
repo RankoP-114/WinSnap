@@ -5,6 +5,7 @@
     <Project Path="src/WinSnap.Interop/WinSnap.Interop.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/WinSnap.App.Tests/WinSnap.App.Tests.csproj" />
     <Project Path="tests/WinSnap.Core.Tests/WinSnap.Core.Tests.csproj" />
   </Folder>
 </Solution>

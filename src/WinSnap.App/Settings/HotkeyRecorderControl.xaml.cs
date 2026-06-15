@@ -16,7 +16,7 @@ namespace WinSnap.App.Settings;
 /// </para>
 /// <para>
 /// 过滤规则（与 HotkeyManager 对齐）：必须至少有一个修饰键（Ctrl/Alt/Shift/Win），
-/// 主键限 A-Z / 0-9 / F1-F24；单独按下修饰键、无修饰键的组合均视为无效、不接受。
+/// 主键限 A-Z / 0-9 / NumPad0-NumPad9 / F1-F24；单独按下修饰键、无修饰键的组合均视为无效、不接受。
 /// </para>
 /// </summary>
 public partial class HotkeyRecorderControl : UserControl
@@ -157,7 +157,7 @@ public partial class HotkeyRecorderControl : UserControl
 
     /// <summary>
     /// 把 <see cref="Key"/> 主键格式化为 HotkeyManager 可解析的标记：
-    /// 字母 A-Z、数字 0-9（含主键盘与小键盘）、功能键 F1-F24。其余返回 false。
+    /// 字母 A-Z、主键盘数字 0-9、小键盘数字 NumPad0-NumPad9、功能键 F1-F24。其余返回 false。
     /// </summary>
     private static bool TryFormatMainKey(Key key, out string token)
     {
@@ -177,10 +177,10 @@ public partial class HotkeyRecorderControl : UserControl
             return true;
         }
 
-        // 小键盘数字 NumPad0-NumPad9（归一为同样的 0-9 标记）
+        // 小键盘数字 NumPad0-NumPad9：保留独立 token，避免和主键盘数字混淆。
         if (key is >= Key.NumPad0 and <= Key.NumPad9)
         {
-            token = ((char)('0' + (key - Key.NumPad0))).ToString();
+            token = "NumPad" + (key - Key.NumPad0);
             return true;
         }
 

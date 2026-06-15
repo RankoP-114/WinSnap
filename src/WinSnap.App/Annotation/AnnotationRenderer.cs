@@ -83,6 +83,7 @@ public static class AnnotationRenderer
         figure.Segments.Add(new LineSegment(p2, false));
         var geo = new PathGeometry();
         geo.Figures.Add(figure);
+        geo.Freeze();
         dc.DrawGeometry(brush, null, geo);
     }
 

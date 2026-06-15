@@ -27,71 +27,221 @@ public sealed class GifCaptureService
         if (!string.IsNullOrWhiteSpace(dir))
             Directory.CreateDirectory(dir);
 
-        int frameCount = Math.Max(1, options.DurationSeconds * options.FramesPerSecond);
-        int delayHundredths = Math.Max(1, (int)Math.Round(100.0 / options.FramesPerSecond));
+        var duration = TimeSpan.FromSeconds(options.DurationSeconds);
         var interval = TimeSpan.FromSeconds(1.0 / options.FramesPerSecond);
-        bool useHdrPath = HdrDetector.AnyHdrActive();
+        bool hdrActive = HdrDetector.AnyHdrActive();
+        bool foregroundFullscreen = IsForegroundFullscreenLike();
+        bool allowDuplicationFallback = hdrActive || foregroundFullscreen;
+        bool preferDuplication = hdrActive;
         var stopwatch = Stopwatch.StartNew();
 
         Log.Information(
-            "GIF 录制开始：区域=({X},{Y},{W},{H}) 时长={Duration}s FPS={Fps} HDR路径={Hdr}",
-            x, y, width, height, options.DurationSeconds, options.FramesPerSecond, useHdrPath);
+            "GIF 录制开始：区域=({X},{Y},{W},{H}) 时长={Duration}s FPS={Fps} HDR={Hdr} 前台全屏={Fullscreen} SDR白={SdrWhite}nit HDR峰值={HdrPeak}nit",
+            x, y, width, height, options.DurationSeconds, options.FramesPerSecond,
+            hdrActive, foregroundFullscreen, options.HdrSdrWhiteLevelNits, options.HdrPeakNits);
 
-        using var encoder = new StreamingGifEncoder(outputPath, width, height, delayHundredths);
+        using var encoder = new StreamingGifEncoder(outputPath, width, height);
         int lastRemainingSeconds = options.DurationSeconds;
         remainingSecondsProgress?.Report(lastRemainingSeconds);
-        for (int i = 0; i < frameCount; i++)
+        bool? useDuplication = null;
+        int frameCount = 0;
+        using var duplicationSession = allowDuplicationFallback
+            ? DuplicationCapture.CreateRegionCaptureSession(
+                x,
+                y,
+                width,
+                height,
+                captureSdrWithDesktopDuplication: true,
+                hdrSdrWhiteNits: options.HdrSdrWhiteLevelNits,
+                hdrPeakNits: options.HdrPeakNits)
+            : null;
+
+        CapturedImage previous = CaptureFrame(
+            x, y, width, height, options, duplicationSession, preferDuplication, allowDuplicationFallback, ref useDuplication);
+        TimeSpan previousAt = TimeSpan.Zero;
+        TimeSpan nextFrameAt = interval;
+
+        while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var captured = CaptureFrame(x, y, width, height, useHdrPath);
-            encoder.WriteFrame(captured);
 
-            int remainingSeconds = Math.Max(0, options.DurationSeconds - ((i + 1) / options.FramesPerSecond));
+            int remainingSeconds = CalculateRemainingSeconds(duration, stopwatch.Elapsed);
             if (remainingSeconds != lastRemainingSeconds)
             {
                 lastRemainingSeconds = remainingSeconds;
                 remainingSecondsProgress?.Report(remainingSeconds);
             }
 
-            var nextFrameAt = TimeSpan.FromTicks(interval.Ticks * (i + 1));
+            if (stopwatch.Elapsed >= duration)
+                break;
+
             var wait = nextFrameAt - stopwatch.Elapsed;
             if (wait > TimeSpan.Zero)
-                await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+            {
+                TimeSpan remaining = duration - stopwatch.Elapsed;
+                await Task.Delay(wait < remaining ? wait : remaining, cancellationToken).ConfigureAwait(false);
+                if (stopwatch.Elapsed >= duration)
+                    break;
+            }
+
+            var captured = CaptureFrame(
+                x, y, width, height, options, duplicationSession, preferDuplication, allowDuplicationFallback, ref useDuplication);
+            TimeSpan capturedAt = stopwatch.Elapsed;
+            encoder.WriteFrame(previous, ToDelayHundredths(capturedAt - previousAt, interval));
+            frameCount++;
+
+            previous = captured;
+            previousAt = capturedAt;
+            do
+            {
+                nextFrameAt += interval;
+            }
+            while (nextFrameAt <= stopwatch.Elapsed && stopwatch.Elapsed < duration);
         }
+
+        encoder.WriteFrame(previous, ToDelayHundredths(duration - previousAt, interval));
+        frameCount++;
+        remainingSecondsProgress?.Report(0);
 
         Log.Information("GIF 录制完成：{Path}，帧数={Frames}", outputPath, frameCount);
     }
 
-    private static CapturedImage CaptureFrame(int x, int y, int width, int height, bool useHdrPath)
-    {
-        if (!useHdrPath)
-            return GdiCapture.CaptureRegion(x, y, width, height);
+    private static int CalculateRemainingSeconds(TimeSpan duration, TimeSpan elapsed)
+        => Math.Max(0, (int)Math.Ceiling((duration - elapsed).TotalSeconds));
 
-        var vs = VirtualScreenInfo.Get();
-        var full = DuplicationCapture.CaptureVirtualScreenHdrAware();
-        return Crop(full, x - vs.X, y - vs.Y, width, height);
+    private static int ToDelayHundredths(TimeSpan actualDelay, TimeSpan fallbackDelay)
+    {
+        TimeSpan delay = actualDelay > TimeSpan.Zero ? actualDelay : fallbackDelay;
+        return Math.Clamp((int)Math.Round(delay.TotalMilliseconds / 10.0), 1, ushort.MaxValue);
     }
 
-    private static CapturedImage Crop(CapturedImage source, int x, int y, int width, int height)
+    private static CapturedImage CaptureFrame(
+        int x,
+        int y,
+        int width,
+        int height,
+        GifCaptureOptions options,
+        DuplicationCapture.RegionCaptureSession? duplicationSession,
+        bool preferDuplication,
+        bool allowDuplicationFallback,
+        ref bool? useDuplication)
     {
-        if (x < 0 || y < 0 || width <= 0 || height <= 0 ||
-            x + width > source.Width || y + height > source.Height)
+        if (useDuplication == true || preferDuplication)
         {
-            throw new InvalidOperationException("GIF 录制区域已超出当前虚拟桌面范围。");
+            try
+            {
+                var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession);
+                if (preferDuplication || duplicated.HasVisibleContent())
+                {
+                    useDuplication = true;
+                    return duplicated;
+                }
+
+                Log.Debug("GIF Desktop Duplication 帧看起来全黑，尝试 GDI 路径。");
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "GIF Desktop Duplication 抓取失败，尝试 GDI 路径。");
+            }
         }
 
-        int rowBytes = width * 4;
-        var buffer = new byte[rowBytes * height];
-        for (int row = 0; row < height; row++)
+        CapturedImage gdi;
+        try
         {
-            Buffer.BlockCopy(
-                source.PixelsBgra,
-                (y + row) * source.Stride + x * 4,
-                buffer,
-                row * rowBytes,
-                rowBytes);
+            gdi = GdiCapture.CaptureRegion(x, y, width, height);
         }
-        return new CapturedImage(width, height, buffer);
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "GIF GDI 区域抓取失败，尝试 Desktop Duplication 兜底。");
+            try
+            {
+                var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession);
+                useDuplication = true;
+                Log.Information("GIF 录制已从 GDI 切换到 Desktop Duplication 兜底。");
+                return duplicated;
+            }
+            catch (Exception fallbackEx)
+            {
+                throw new InvalidOperationException(
+                    $"GIF 区域抓取失败：GDI={ex.Message}；Desktop Duplication={fallbackEx.Message}",
+                    fallbackEx);
+            }
+        }
+
+        if (useDuplication == false || !allowDuplicationFallback || gdi.HasVisibleContent())
+        {
+            useDuplication ??= false;
+            return gdi;
+        }
+
+        try
+        {
+            var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession);
+            if (duplicated.HasVisibleContent())
+            {
+                useDuplication = true;
+                Log.Information("GIF 录制区域 GDI 首帧看起来全黑，已切换到 Desktop Duplication 兜底。");
+                return duplicated;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "GIF Desktop Duplication 兜底失败，继续使用 GDI 帧。");
+        }
+
+        useDuplication = false;
+        return gdi;
+    }
+
+    private static CapturedImage CaptureFrameWithDuplication(
+        int x,
+        int y,
+        int width,
+        int height,
+        GifCaptureOptions options,
+        DuplicationCapture.RegionCaptureSession? duplicationSession)
+        => duplicationSession?.Capture()
+           ?? DuplicationCapture.CaptureRegionHdrAware(
+               x,
+               y,
+               width,
+               height,
+               captureSdrWithDesktopDuplication: true,
+               hdrSdrWhiteNits: options.HdrSdrWhiteLevelNits,
+               hdrPeakNits: options.HdrPeakNits);
+
+    private static bool IsForegroundFullscreenLike()
+    {
+        if (!WindowEnumerator.TryGetForegroundWindowBounds(out var foreground))
+            return false;
+
+        var monitors = MonitorEnumerator.GetMonitors();
+        if (monitors.Count == 0)
+        {
+            var vs = VirtualScreenInfo.Get();
+            monitors = new List<MonitorInfo> { new(vs.X, vs.Y, vs.Width, vs.Height, 96) };
+        }
+
+        foreach (var monitor in monitors)
+        {
+            if (Covers(foreground, monitor, tolerancePx: 8))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool Covers(WindowEnumerator.WindowBounds window, MonitorInfo monitor, int tolerancePx)
+    {
+        int windowRight = window.X + window.Width;
+        int windowBottom = window.Y + window.Height;
+
+        return window.X <= monitor.X + tolerancePx
+               && window.Y <= monitor.Y + tolerancePx
+               && windowRight >= monitor.Right - tolerancePx
+               && windowBottom >= monitor.Bottom - tolerancePx
+               && window.Width >= monitor.Width - tolerancePx
+               && window.Height >= monitor.Height - tolerancePx;
     }
 
     private sealed class StreamingGifEncoder : IDisposable
@@ -100,26 +250,24 @@ public sealed class GifCaptureService
         private readonly FileStream _stream;
         private readonly int _width;
         private readonly int _height;
-        private readonly ushort _delayHundredths;
         private bool _disposed;
 
-        public StreamingGifEncoder(string path, int width, int height, int delayHundredths)
+        public StreamingGifEncoder(string path, int width, int height)
         {
             _width = width;
             _height = height;
-            _delayHundredths = (ushort)Math.Clamp(delayHundredths, 1, ushort.MaxValue);
             _stream = File.Create(path);
             WriteHeader();
         }
 
-        public void WriteFrame(CapturedImage image)
+        public void WriteFrame(CapturedImage image, int delayHundredths)
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(StreamingGifEncoder));
             if (image.Width != _width || image.Height != _height)
                 throw new InvalidOperationException("GIF 帧尺寸不一致。");
 
-            WriteGraphicControlExtension();
+            WriteGraphicControlExtension((ushort)Math.Clamp(delayHundredths, 1, ushort.MaxValue));
             WriteImageDescriptor();
             WriteLzwImageData(image);
         }
@@ -170,13 +318,13 @@ public sealed class GifCaptureService
             _stream.WriteByte(0x00);
         }
 
-        private void WriteGraphicControlExtension()
+        private void WriteGraphicControlExtension(ushort delayHundredths)
         {
             _stream.WriteByte(0x21);
             _stream.WriteByte(0xF9);
             _stream.WriteByte(0x04);
-            _stream.WriteByte(0x08); // disposal = restore to background
-            WriteUInt16(_delayHundredths);
+            _stream.WriteByte(0x00); // no transparency, leave previous full frame in place until next frame
+            WriteUInt16(delayHundredths);
             _stream.WriteByte(0x00);
             _stream.WriteByte(0x00);
         }

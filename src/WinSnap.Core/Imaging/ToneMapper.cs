@@ -66,68 +66,112 @@ public sealed class ToneMapper
 
         var dst = new byte[expected];
 
-        // EETF 参数（相对 SDR 白线性域）：膝点略低于白点，源峰值归一 = hdrPeak/sdrWhite。
-        double xPeak = hdrPeakNits / sdrWhiteNits; // >= 1
-        const double ks = KneeStart;
-        double invSdrWhite = 1.0 / sdrWhiteNits;
-        double scaleScrgbToRel = ScrgbWhiteNits * invSdrWhite; // scRGB→相对SDR白线性 的合成系数
-
         int pixelCount = width * height;
         for (int i = 0; i < pixelCount; i++)
         {
             int s = i * 4;
-            float aF = scRgbaLinear[s + 3];
+            var (b, g, r, a) = MapScRgbPixelToSdrBgraCore(
+                scRgbaLinear[s],
+                scRgbaLinear[s + 1],
+                scRgbaLinear[s + 2],
+                scRgbaLinear[s + 3],
+                sdrWhiteNits,
+                hdrPeakNits,
+                inputIsRec2020,
+                BlackBoost);
 
-            // ① scRGB → 相对 SDR 白线性（白点 = 1.0）
-            double rRel = ToRelativeSdrWhite(scRgbaLinear[s], scaleScrgbToRel, xPeak);
-            double gRel = ToRelativeSdrWhite(scRgbaLinear[s + 1], scaleScrgbToRel, xPeak);
-            double bRel = ToRelativeSdrWhite(scRgbaLinear[s + 2], scaleScrgbToRel, xPeak);
-
-            // ② maxRGB EETF：对峰值通道求肩部压缩增益，等比缩放（保色相）
-            double maxRel = Math.Max(rRel, Math.Max(gRel, bRel));
-            if (maxRel > 1e-9)
-            {
-                double mapped = Eetf(maxRel, ks, xPeak);
-                double gain = mapped / maxRel;
-                rRel *= gain;
-                gRel *= gain;
-                bRel *= gain;
-            }
-
-            // ③ Rec.2020 → Rec.709 色域（仅当输入为 Rec.2020 原色时）。
-            //    DXGI scRGB（inputIsRec2020=false）原色即 Rec.709，跳过矩阵直通。
-            double r709, g709, b709;
-            if (inputIsRec2020)
-            {
-                r709 = (1.6604910 * rRel) - (0.5876411 * gRel) - (0.0728499 * bRel);
-                g709 = (-0.1245505 * rRel) + (1.1328999 * gRel) - (0.0083494 * bRel);
-                b709 = (-0.0181508 * rRel) - (0.1005789 * gRel) + (1.1187297 * bRel);
-            }
-            else
-            {
-                r709 = rRel;
-                g709 = gRel;
-                b709 = bRel;
-            }
-
-            r709 = Clamp01(r709);
-            g709 = Clamp01(g709);
-            b709 = Clamp01(b709);
-
-            // ④ sRGB OETF → 8bit
-            byte r8 = ToByte(SrgbOetf(r709));
-            byte g8 = ToByte(SrgbOetf(g709));
-            byte b8 = ToByte(SrgbOetf(b709));
-            byte a8 = ToByte(Clamp01OrDefault(aF, fallback: 1.0));
-
-            // BGRA
-            dst[s] = b8;
-            dst[s + 1] = g8;
-            dst[s + 2] = r8;
-            dst[s + 3] = a8;
+            dst[s] = b;
+            dst[s + 1] = g;
+            dst[s + 2] = r;
+            dst[s + 3] = a;
         }
 
         return dst;
+    }
+
+    /// <summary>
+    /// 映射单个 scRGB 像素到 SDR BGRA。供流式/局部捕获路径复用同一套 tone map 常量与公式，
+    /// 避免为了处理子矩形而复制 <see cref="ToneMapper"/> 的内部实现。
+    /// </summary>
+    public static (byte B, byte G, byte R, byte A) MapScRgbPixelToSdrBgra(
+        float rLinear,
+        float gLinear,
+        float bLinear,
+        float aLinear,
+        double sdrWhiteNits = DefaultSdrWhiteNits,
+        double hdrPeakNits = DefaultHdrPeakNits,
+        bool inputIsRec2020 = true)
+    {
+        if (!IsPositiveFinite(sdrWhiteNits)) throw new ArgumentOutOfRangeException(nameof(sdrWhiteNits));
+        if (!IsPositiveFinite(hdrPeakNits)) throw new ArgumentOutOfRangeException(nameof(hdrPeakNits));
+        if (hdrPeakNits < sdrWhiteNits) hdrPeakNits = sdrWhiteNits;
+
+        return MapScRgbPixelToSdrBgraCore(
+            rLinear,
+            gLinear,
+            bLinear,
+            aLinear,
+            sdrWhiteNits,
+            hdrPeakNits,
+            inputIsRec2020,
+            blackBoost: 0.0);
+    }
+
+    private static (byte B, byte G, byte R, byte A) MapScRgbPixelToSdrBgraCore(
+        float rLinear,
+        float gLinear,
+        float bLinear,
+        float aLinear,
+        double sdrWhiteNits,
+        double hdrPeakNits,
+        bool inputIsRec2020,
+        double blackBoost)
+    {
+        // EETF 参数（相对 SDR 白线性域）：膝点略低于白点，源峰值归一 = hdrPeak/sdrWhite。
+        double xPeak = hdrPeakNits / sdrWhiteNits; // >= 1
+        double scaleScrgbToRel = ScrgbWhiteNits / sdrWhiteNits; // scRGB→相对SDR白线性 的合成系数
+
+        // ① scRGB → 相对 SDR 白线性（白点 = 1.0）
+        double rRel = ToRelativeSdrWhite(rLinear, scaleScrgbToRel, xPeak);
+        double gRel = ToRelativeSdrWhite(gLinear, scaleScrgbToRel, xPeak);
+        double bRel = ToRelativeSdrWhite(bLinear, scaleScrgbToRel, xPeak);
+
+        // ② maxRGB EETF：对峰值通道求肩部压缩增益，等比缩放（保色相）
+        double maxRel = Math.Max(rRel, Math.Max(gRel, bRel));
+        if (maxRel > 1e-9)
+        {
+            double mapped = Eetf(maxRel, KneeStart, xPeak, blackBoost);
+            double gain = mapped / maxRel;
+            rRel *= gain;
+            gRel *= gain;
+            bRel *= gain;
+        }
+
+        // ③ Rec.2020 → Rec.709 色域（仅当输入为 Rec.2020 原色时）。
+        //    DXGI scRGB（inputIsRec2020=false）原色即 Rec.709，跳过矩阵直通。
+        double r709;
+        double g709;
+        double b709;
+        if (inputIsRec2020)
+        {
+            r709 = (1.6604910 * rRel) - (0.5876411 * gRel) - (0.0728499 * bRel);
+            g709 = (-0.1245505 * rRel) + (1.1328999 * gRel) - (0.0083494 * bRel);
+            b709 = (-0.0181508 * rRel) - (0.1005789 * gRel) + (1.1187297 * bRel);
+        }
+        else
+        {
+            r709 = rRel;
+            g709 = gRel;
+            b709 = bRel;
+        }
+
+        // ④ sRGB OETF → 8bit
+        byte r8 = ToByte(SrgbOetf(Clamp01(r709)));
+        byte g8 = ToByte(SrgbOetf(Clamp01(g709)));
+        byte b8 = ToByte(SrgbOetf(Clamp01(b709)));
+        byte a8 = ToByte(Clamp01OrDefault(aLinear, fallback: 1.0));
+
+        return (b8, g8, r8, a8);
     }
 
     /// <summary>
@@ -135,7 +179,7 @@ public sealed class ToneMapper
     /// x ≤ <paramref name="ks"/> 恒等；x &gt; ks 用单调 shoulder 把 [ks, xPeak] 滚降到 [ks, 1]；
     /// 末尾施加 black boost。
     /// </summary>
-    private double Eetf(double x, double ks, double xPeak)
+    private static double Eetf(double x, double ks, double xPeak, double blackBoost)
     {
         if (double.IsNaN(x) || x <= 0.0) return 0.0;
         if (double.IsPositiveInfinity(x)) return 1.0;
@@ -156,10 +200,10 @@ public sealed class ToneMapper
         }
 
         // black boost（BT.2390 形式）：minLum*(1-y)^4
-        if (BlackBoost > 0.0)
+        if (blackBoost > 0.0)
         {
             double inv = 1.0 - y;
-            y += BlackBoost * inv * inv * inv * inv;
+            y += blackBoost * inv * inv * inv * inv;
         }
 
         return Clamp01(y);

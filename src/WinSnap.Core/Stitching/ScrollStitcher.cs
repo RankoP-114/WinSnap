@@ -36,6 +36,7 @@ public sealed class ScrollStitcher
     private byte[]? _bgra;      // 结果像素（BGRA，top-down，stride=_width*4）
     private int _width;
     private int _height;        // 当前结果高度
+    private int _capacityHeight;
     private byte[]? _lastFrame; // 上一帧像素
     private int _lastFrameHeight;
 
@@ -79,8 +80,15 @@ public sealed class ScrollStitcher
         MaxAverageSadPerChannel = maxAverageSadPerChannel;
     }
 
-    /// <summary>追加一帧。首帧作基底；其后按重叠对齐追加新增部分。</summary>
-    public void Append(PixelBuffer frame)
+    /// <summary>
+    /// 追加一帧。首帧作基底；其后按重叠对齐追加新增部分。
+    /// </summary>
+    /// <param name="frame">要追加的滚动帧。</param>
+    /// <param name="ownsFrame">
+    /// 当调用方保证追加后不再修改或复用 <paramref name="frame"/> 的像素数组时传 true，
+    /// 拼接器可直接保留该数组作为上一帧，避免一次大图克隆。
+    /// </param>
+    public void Append(PixelBuffer frame, bool ownsFrame = false)
     {
         ArgumentNullException.ThrowIfNull(frame);
         if (frame.Width <= 0 || frame.Height <= 0)
@@ -91,8 +99,9 @@ public sealed class ScrollStitcher
             // 首帧：整幅作为基底
             _width = frame.Width;
             _height = frame.Height;
-            _bgra = (byte[])frame.Bgra.Clone();
-            _lastFrame = (byte[])frame.Bgra.Clone();
+            _capacityHeight = frame.Height;
+            _bgra = RetainFrame(frame, ownsFrame);
+            _lastFrame = ownsFrame ? _bgra : (byte[])frame.Bgra.Clone();
             _lastFrameHeight = frame.Height;
             FrameCount = 1;
             LastAppendedHeight = frame.Height;
@@ -116,7 +125,7 @@ public sealed class ScrollStitcher
             LastMatchFailed = true;
             LastMatchAverageSadPerChannel = averageSad;
             IsAtBottom = false;
-            _lastFrame = (byte[])frame.Bgra.Clone();
+            _lastFrame = RetainFrame(frame, ownsFrame);
             _lastFrameHeight = frame.Height;
             return;
         }
@@ -130,7 +139,7 @@ public sealed class ScrollStitcher
             LastAppendedHeight = Math.Max(0, newRows);
             IsAtBottom = true;
             // 仍更新 lastFrame，便于后续（通常不会再追加）
-            _lastFrame = (byte[])frame.Bgra.Clone();
+            _lastFrame = RetainFrame(frame, ownsFrame);
             _lastFrameHeight = frame.Height;
             if (newRows > 0)
                 AppendBottomRows(frame, frame.Height - newRows, newRows);
@@ -140,7 +149,7 @@ public sealed class ScrollStitcher
         AppendBottomRows(frame, frame.Height - newRows, newRows);
         LastAppendedHeight = newRows;
         IsAtBottom = false;
-        _lastFrame = (byte[])frame.Bgra.Clone();
+        _lastFrame = RetainFrame(frame, ownsFrame);
         _lastFrameHeight = frame.Height;
     }
 
@@ -161,6 +170,7 @@ public sealed class ScrollStitcher
         _lastFrame = null;
         _width = 0;
         _height = 0;
+        _capacityHeight = 0;
         _lastFrameHeight = 0;
         FrameCount = 0;
         LastAppendedHeight = 0;
@@ -253,10 +263,25 @@ public sealed class ScrollStitcher
         if (count <= 0) return;
         int stride = _width * PixelBuffer.BytesPerPixel;
         int newHeight = checked(_height + count);
-        var grown = new byte[checked(newHeight * stride)];
-        Buffer.BlockCopy(_bgra!, 0, grown, 0, checked(_height * stride));
-        Buffer.BlockCopy(frame.Bgra, checked(srcStartRow * stride), grown, checked(_height * stride), checked(count * stride));
-        _bgra = grown;
+        EnsureCapacity(newHeight, stride);
+        Buffer.BlockCopy(frame.Bgra, checked(srcStartRow * stride), _bgra!, checked(_height * stride), checked(count * stride));
         _height = newHeight;
     }
+
+    private void EnsureCapacity(int requiredHeight, int stride)
+    {
+        if (_bgra is null)
+            throw new InvalidOperationException("拼接缓冲尚未初始化。");
+        if (requiredHeight <= _capacityHeight)
+            return;
+
+        int newCapacity = Math.Max(requiredHeight, checked(Math.Max(_capacityHeight, 1) * 2));
+        var grown = new byte[checked(newCapacity * stride)];
+        Buffer.BlockCopy(_bgra, 0, grown, 0, checked(_height * stride));
+        _bgra = grown;
+        _capacityHeight = newCapacity;
+    }
+
+    private static byte[] RetainFrame(PixelBuffer frame, bool ownsFrame)
+        => ownsFrame ? frame.Bgra : (byte[])frame.Bgra.Clone();
 }

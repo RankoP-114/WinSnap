@@ -11,7 +11,8 @@ public sealed class AppSettings
     // ---- 全局热键（M1 注册 / M9 自定义）----
     public string CaptureHotkey { get; set; } = "Ctrl+Alt+A";
     public string PinHotkey { get; set; } = "Ctrl+Alt+P";
-    public string ScrollCaptureHotkey { get; set; } = "Ctrl+Alt+S";
+    public string ScrollCaptureHotkey { get; set; } = string.Empty;
+    public string GifCaptureHotkey { get; set; } = "Ctrl+Alt+G";
 
     // ---- 保存（M3）----
     public string DefaultSaveFormat { get; set; } = "png"; // png | jpg

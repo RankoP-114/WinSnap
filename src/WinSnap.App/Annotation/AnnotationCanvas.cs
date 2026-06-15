@@ -107,8 +107,8 @@ public sealed class AnnotationCanvas : FrameworkElement
                 out Rect destRect))
             return;
 
-        var pixelated = Pixelate(mosaicSource, sx, sy, w, h, Math.Max(4, mosaic.BlockSize));
-        dc.DrawImage(pixelated, destRect);
+        var image = RenderMosaicBitmap(mosaicSource, sx, sy, w, h, Math.Max(4, mosaic.BlockSize), mosaic.Mode);
+        dc.DrawImage(image, destRect);
     }
 
     private void RenderElementCached(DrawingContext dc, AnnotationElement element)
@@ -134,13 +134,13 @@ public sealed class AnnotationCanvas : FrameworkElement
         int block = Math.Max(4, mosaic.BlockSize);
         var key = new MosaicCacheKey(mosaic.Id, sx, sy, w, h, block, mosaic.Mode);
         _liveMosaicKeys.Add(key);
-        if (!_mosaicCache.TryGetValue(key, out BitmapSource? pixelated))
+        if (!_mosaicCache.TryGetValue(key, out BitmapSource? image))
         {
-            pixelated = Pixelate(source, sx, sy, w, h, block);
-            _mosaicCache[key] = pixelated;
+            image = RenderMosaicBitmap(source, sx, sy, w, h, block, mosaic.Mode);
+            _mosaicCache[key] = image;
         }
 
-        dc.DrawImage(pixelated, destRect);
+        dc.DrawImage(image, destRect);
     }
 
     private void PruneMosaicCache()
@@ -187,13 +187,23 @@ public sealed class AnnotationCanvas : FrameworkElement
         return true;
     }
 
+    private static BitmapSource RenderMosaicBitmap(
+        BitmapSource src,
+        int sx,
+        int sy,
+        int w,
+        int h,
+        int block,
+        MosaicMode mode)
+        => mode == MosaicMode.Blur
+            ? Blur(src, sx, sy, w, h, block)
+            : Pixelate(src, sx, sy, w, h, block);
+
     /// <summary>对背景某区域做块平均像素化，返回 Bgra32 位图。</summary>
     private static BitmapSource Pixelate(BitmapSource src, int sx, int sy, int w, int h, int block)
     {
-        var crop = new CroppedBitmap(src, new Int32Rect(sx, sy, w, h));
+        var px = CopyBgraPixels(src, sx, sy, w, h);
         int stride = w * 4;
-        var px = new byte[stride * h];
-        crop.CopyPixels(px, stride, 0);
 
         for (int by = 0; by < h; by += block)
         for (int bx = 0; bx < w; bx += block)
@@ -220,6 +230,120 @@ public sealed class AnnotationCanvas : FrameworkElement
         var result = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, px, stride);
         result.Freeze();
         return result;
+    }
+
+    /// <summary>对背景某区域做盒式模糊，返回 Bgra32 位图。</summary>
+    private static BitmapSource Blur(BitmapSource src, int sx, int sy, int w, int h, int radius)
+    {
+        var px = CopyBgraPixels(src, sx, sy, w, h);
+        int stride = w * 4;
+        int r = Math.Clamp(radius, 2, 64);
+        var temp = new byte[px.Length];
+        var dst = new byte[px.Length];
+
+        for (int y = 0; y < h; y++)
+        {
+            long b = 0, g = 0, red = 0;
+            int count = 0;
+            int left = 0;
+            int right = -1;
+            int row = y * stride;
+
+            for (int x = 0; x < w; x++)
+            {
+                int targetLeft = Math.Max(0, x - r);
+                int targetRight = Math.Min(w - 1, x + r);
+                while (right < targetRight)
+                {
+                    right++;
+                    int i = row + right * 4;
+                    b += px[i];
+                    g += px[i + 1];
+                    red += px[i + 2];
+                    count++;
+                }
+
+                while (left < targetLeft)
+                {
+                    int i = row + left * 4;
+                    b -= px[i];
+                    g -= px[i + 1];
+                    red -= px[i + 2];
+                    count--;
+                    left++;
+                }
+
+                int o = row + x * 4;
+                temp[o] = (byte)(b / count);
+                temp[o + 1] = (byte)(g / count);
+                temp[o + 2] = (byte)(red / count);
+                temp[o + 3] = 255;
+            }
+        }
+
+        for (int x = 0; x < w; x++)
+        {
+            long b = 0, g = 0, red = 0;
+            int count = 0;
+            int top = 0;
+            int bottom = -1;
+            int xOffset = x * 4;
+
+            for (int y = 0; y < h; y++)
+            {
+                int targetTop = Math.Max(0, y - r);
+                int targetBottom = Math.Min(h - 1, y + r);
+                while (bottom < targetBottom)
+                {
+                    bottom++;
+                    int i = bottom * stride + xOffset;
+                    b += temp[i];
+                    g += temp[i + 1];
+                    red += temp[i + 2];
+                    count++;
+                }
+
+                while (top < targetTop)
+                {
+                    int i = top * stride + xOffset;
+                    b -= temp[i];
+                    g -= temp[i + 1];
+                    red -= temp[i + 2];
+                    count--;
+                    top++;
+                }
+
+                int o = y * stride + xOffset;
+                dst[o] = (byte)(b / count);
+                dst[o + 1] = (byte)(g / count);
+                dst[o + 2] = (byte)(red / count);
+                dst[o + 3] = 255;
+            }
+        }
+
+        var result = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, dst, stride);
+        result.Freeze();
+        return result;
+    }
+
+    private static byte[] CopyBgraPixels(BitmapSource src, int sx, int sy, int w, int h)
+    {
+        var crop = new CroppedBitmap(src, new Int32Rect(sx, sy, w, h));
+        BitmapSource source = crop;
+        if (source.Format != PixelFormats.Bgra32)
+        {
+            var converted = new FormatConvertedBitmap();
+            converted.BeginInit();
+            converted.Source = crop;
+            converted.DestinationFormat = PixelFormats.Bgra32;
+            converted.EndInit();
+            source = converted;
+        }
+
+        int stride = w * 4;
+        var px = new byte[stride * h];
+        source.CopyPixels(px, stride, 0);
+        return px;
     }
 
     private readonly record struct MosaicCacheKey(

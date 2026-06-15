@@ -15,35 +15,51 @@ public sealed class TextAnnotation : AnnotationElement
     public double FontSize { get; set; } = 16.0;
 
     /// <summary>
-    /// 估算包围盒。无字体度量，按等宽近似：行高 ≈ FontSize*1.4，
-    /// 字宽 ≈ FontSize*0.6，取各行最长者。仅用于命中与脏区估计。
+    /// 估算包围盒。无字体度量，按近似字宽累计：行高 ≈ FontSize*1.4，
+    /// ASCII 窄字符 ≈ FontSize*0.6，CJK/全角字符 ≈ FontSize，取各行最宽者。仅用于命中与脏区估计。
     /// </summary>
     public override RectInt GetBounds()
     {
         double lineHeight = FontSize * 1.4;
-        double charWidth = FontSize * 0.6;
-        int maxLineLen = 0;
+        double maxLineWidth = 0;
         int lines = 1;
-        int cur = 0;
+        double currentLineWidth = 0;
         foreach (char ch in Text)
         {
             if (ch == '\n')
             {
                 lines++;
-                if (cur > maxLineLen) maxLineLen = cur;
-                cur = 0;
+                if (currentLineWidth > maxLineWidth) maxLineWidth = currentLineWidth;
+                currentLineWidth = 0;
             }
             else
             {
-                cur++;
+                currentLineWidth += EstimateCharWidthFactor(ch);
             }
         }
-        if (cur > maxLineLen) maxLineLen = cur;
+        if (currentLineWidth > maxLineWidth) maxLineWidth = currentLineWidth;
 
-        int w = (int)Math.Ceiling(Math.Max(1, maxLineLen) * charWidth);
+        int w = (int)Math.Ceiling(Math.Max(1.0, maxLineWidth) * FontSize);
         int h = (int)Math.Ceiling(lines * lineHeight);
         return new RectInt(Position.X, Position.Y, w, h);
     }
+
+    private static double EstimateCharWidthFactor(char ch)
+    {
+        if (ch == '\t')
+            return 2.4;
+        if (IsWideChar(ch))
+            return 1.0;
+        return 0.6;
+    }
+
+    private static bool IsWideChar(char ch)
+        => ch is >= '\u2E80' and <= '\uA4CF'
+            or >= '\uAC00' and <= '\uD7A3'
+            or >= '\uF900' and <= '\uFAFF'
+            or >= '\uFE10' and <= '\uFE6F'
+            or >= '\uFF01' and <= '\uFF60'
+            or >= '\uFFE0' and <= '\uFFE6';
 
     public override bool HitTest(PointInt p, double tolerance)
     {

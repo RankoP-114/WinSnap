@@ -1,3 +1,5 @@
+using System.Windows;
+using System.Windows.Threading;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Serilog;
@@ -13,7 +15,8 @@ namespace WinSnap.App.ScrollCapture;
 ///
 /// 自动模式每帧后用 <see cref="InputSimulator.ScrollVertical"/> 注入向下滚轮，等待一小段时间让目标重绘，
 /// 再截下一帧；直到 <see cref="ScrollStitcher.IsAtBottom"/> 或触达上限。
-/// 线程：捕获/拼接为 CPU 工作，放在线程池执行；返回的 <see cref="BitmapSource"/> 已 Freeze，可跨线程使用。
+/// 线程：滚动/拼接为 CPU 工作，放在线程池执行；GDI 抓帧经 UI Dispatcher 执行，避开部分
+/// RDP/终端服务环境中后台线程 BitBlt 偶发黑帧的问题。返回的 <see cref="BitmapSource"/> 已 Freeze，可跨线程使用。
 /// </summary>
 public sealed class ScrollCaptureService
 {
@@ -50,6 +53,7 @@ public sealed class ScrollCaptureService
         int centerY = regionY + regionH / 2;
 
         var stitcher = new ScrollStitcher();
+        var captureDispatcher = Application.Current?.Dispatcher;
 
         try
         {
@@ -64,9 +68,14 @@ public sealed class ScrollCaptureService
                     // 每帧重置光标到中心：避免用户/系统期间移走光标导致滚轮丢失目标。
                     InputSimulator.MoveCursorTo(centerX, centerY);
 
-                    var captured = GdiCapture.CaptureRegion(regionX, regionY, regionW, regionH);
+                    var captured = CaptureRegionOnDispatcher(
+                        captureDispatcher,
+                        regionX,
+                        regionY,
+                        regionW,
+                        regionH);
                     var frame = ToPixelBuffer(captured);
-                    stitcher.Append(frame);
+                    stitcher.Append(frame, ownsFrame: true);
 
                     if (stitcher.LastMatchFailed)
                     {
@@ -96,19 +105,39 @@ public sealed class ScrollCaptureService
         return ToBitmapSource(stitcher.Build());
     }
 
+    private static CapturedImage CaptureRegionOnDispatcher(
+        Dispatcher? dispatcher,
+        int x,
+        int y,
+        int width,
+        int height)
+    {
+        if (dispatcher is null ||
+            dispatcher.HasShutdownStarted ||
+            dispatcher.HasShutdownFinished ||
+            dispatcher.CheckAccess())
+        {
+            return GdiCapture.CaptureRegion(x, y, width, height);
+        }
+
+        return dispatcher.Invoke(
+            () => GdiCapture.CaptureRegion(x, y, width, height),
+            DispatcherPriority.Send);
+    }
+
     // ---- 转换辅助：与现有 ImagingHelper 风格一致。----
 
     /// <summary>把 GDI 捕获的 BGRA 帧（top-down, stride=Width*4）包装为平台无关的 <see cref="PixelBuffer"/>。</summary>
     private static PixelBuffer ToPixelBuffer(CapturedImage img)
     {
-        // CapturedImage 已是紧密排布的 32bpp BGRA、stride=Width*4，与 PixelBuffer 约定一致。
-        // 复制一份所有权交给 PixelBuffer（其构造要求长度恰为 W*H*4）。
+        // CapturedImage 通常已是紧密排布的 32bpp BGRA、stride=Width*4，与 PixelBuffer 约定一致。
+        // 调用方不会再复用该 CapturedImage，因此正常路径直接转交数组所有权。
         byte[] src = img.PixelsBgra;
         int expected = img.Width * img.Height * PixelBuffer.BytesPerPixel;
         byte[] bgra;
         if (src.Length == expected)
         {
-            bgra = (byte[])src.Clone();
+            bgra = src;
         }
         else
         {

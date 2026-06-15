@@ -13,14 +13,13 @@ namespace WinSnap.Interop;
 ///    AlphaMask=0xFF000000、sRGB）——这是 Chromium 写/读剪贴板图片用的标准形态。
 ///    <b>不写 CF_DIB</b>：否则 Windows 会用 CF_DIB 反向合成并覆盖我们的 CF_DIBV5
 ///    （使 AlphaMask 退化为 0），让 Chromium 系读取失败。系统会自动从我们的 V5 合成 CF_DIB。
-/// ② <c>CF_BITMAP</c>：写入后由系统接管 HBITMAP 所有权，不可删除。
+/// ② 不主动写 <c>CF_BITMAP</c>：自写 HBITMAP 跨进程兼容性差，且会干扰读取优先级；
 /// ③ <c>CF_HDROP</c>：附带临时 PNG 文件路径，供"粘贴文件"的应用。
 /// </para>
 /// 本类不依赖 WPF，仅使用 Win32 + System.Drawing。
 /// </summary>
 public static class ClipboardHelper
 {
-    private const uint CF_BITMAP = 2;
     private const uint CF_DIBV5 = 17;
     private const uint CF_HDROP = 15;
 
@@ -28,7 +27,7 @@ public static class ClipboardHelper
     private const uint GMEM_ZEROINIT = 0x0040;
     private const uint GHND = GMEM_MOVEABLE | GMEM_ZEROINIT;
 
-    /// <summary>把图像写入剪贴板（CF_DIBV5 + CF_BITMAP + 可选 CF_HDROP）。线程须为 STA。</summary>
+    /// <summary>把图像写入剪贴板（CF_DIBV5 + 可选 CF_HDROP）。线程须为 STA。</summary>
     public static void CopyImage(CapturedImage image, string? filePath = null)
     {
         ArgumentNullException.ThrowIfNull(image);
@@ -200,14 +199,6 @@ public static class ClipboardHelper
         }
     }
 
-    private static void SetBitmapFormat(Bitmap bmp)
-    {
-        // CF_BITMAP：SetClipboardData 成功后系统接管 HBITMAP 所有权，绝不能再删除，否则位图失效。
-        IntPtr hBitmap = bmp.GetHbitmap();
-        if (SetClipboardData(CF_BITMAP, hBitmap) == IntPtr.Zero)
-            DeleteObject(hBitmap);
-    }
-
     /// <summary>把单个文件路径写入 CF_HDROP（DROPFILES 头 + 宽字符路径 + 双 null 结尾）。</summary>
     private static void SetHDropFormat(string filePath)
     {
@@ -290,7 +281,4 @@ public static class ClipboardHelper
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GlobalUnlock(IntPtr hMem);
 
-    [DllImport("gdi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DeleteObject(IntPtr ho);
 }

@@ -32,7 +32,9 @@ public static class MonitorEnumerator
             return true;
         }
 
-        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, Callback, IntPtr.Zero);
+        MonitorEnumProc proc = Callback;
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, proc, IntPtr.Zero);
+        GC.KeepAlive(proc);
         return list;
     }
 

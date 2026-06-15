@@ -8,6 +8,7 @@ namespace WinSnap.Core.Annotations;
 /// </summary>
 public sealed class AnnotationDocument
 {
+    private const int ZIndexNormalizeThreshold = int.MaxValue - 1024;
     private readonly List<AnnotationElement> _elements = new();
 
     /// <summary>当前元素只读视图（按插入顺序，未排序）。</summary>
@@ -109,6 +110,25 @@ public sealed class AnnotationDocument
         int maxZ = int.MinValue;
         foreach (var e in _elements)
             if (e.ZIndex > maxZ) maxZ = e.ZIndex;
+
+        if (maxZ >= ZIndexNormalizeThreshold)
+        {
+            NormalizeZIndices();
+            maxZ = _elements.Count - 1;
+        }
+
         element.ZIndex = (maxZ == int.MinValue) ? 0 : maxZ + 1;
+    }
+
+    private void NormalizeZIndices()
+    {
+        var ordered = _elements
+            .Select((e, i) => (Element: e, Index: i))
+            .OrderBy(t => t.Element.ZIndex)
+            .ThenBy(t => t.Index)
+            .ToArray();
+
+        for (int i = 0; i < ordered.Length; i++)
+            ordered[i].Element.ZIndex = i;
     }
 }

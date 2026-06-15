@@ -65,6 +65,20 @@ public class AnnotationTests
     }
 
     [Fact]
+    public void Text_Bounds_AccountForWideCjkCharacters()
+    {
+        var text = new TextAnnotation
+        {
+            Position = new PointInt(0, 0),
+            Text = "截图工具",
+            FontSize = 20,
+        };
+
+        Assert.True(text.GetBounds().Width >= 80);
+        Assert.True(text.HitTest(new PointInt(75, 10), tolerance: 0));
+    }
+
+    [Fact]
     public void Mosaic_DefaultsAndClone()
     {
         var m = new MosaicAnnotation { Rect = new RectInt(0, 0, 20, 20), BlockSize = 8, Mode = MosaicMode.Blur };
@@ -193,5 +207,21 @@ public class AnnotationTests
         doc.Add(b);
         doc.BringToFront(b);
         Assert.True(b.ZIndex > a.ZIndex);
+    }
+
+    [Fact]
+    public void Document_BringToFront_NormalizesWhenZIndexNearOverflow()
+    {
+        var doc = new AnnotationDocument();
+        var bottom = new RectangleAnnotation { ZIndex = int.MaxValue - 1, Rect = new RectInt(0, 0, 5, 5) };
+        var top = new RectangleAnnotation { ZIndex = int.MaxValue, Rect = new RectInt(0, 0, 5, 5) };
+        doc.Add(bottom);
+        doc.Add(top);
+
+        doc.BringToFront(bottom);
+
+        Assert.True(bottom.ZIndex > top.ZIndex);
+        Assert.NotEqual(int.MinValue, bottom.ZIndex);
+        Assert.Equal(new AnnotationElement[] { top, bottom }, doc.InZOrder().ToArray());
     }
 }

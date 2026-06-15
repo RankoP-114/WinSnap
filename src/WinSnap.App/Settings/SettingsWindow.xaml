@@ -73,8 +73,8 @@
                     <local:HotkeyRecorderControl x:Name="PinHotkeyRecorder"
                                                  HorizontalAlignment="Left"
                                                  Margin="0,0,0,10" />
-                    <TextBlock Text="长截图" Margin="0,0,0,4" />
-                    <local:HotkeyRecorderControl x:Name="ScrollHotkeyRecorder"
+                    <TextBlock Text="GIF 录制" Margin="0,0,0,4" />
+                    <local:HotkeyRecorderControl x:Name="GifHotkeyRecorder"
                                                  HorizontalAlignment="Left" />
                 </StackPanel>
 

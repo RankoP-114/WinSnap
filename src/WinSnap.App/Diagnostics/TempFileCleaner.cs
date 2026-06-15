@@ -24,7 +24,20 @@ internal static class TempFileCleaner
             return;
 
         lastCleanupUtc = now;
-        foreach (string pattern in new[] { "Screenshot_*.png", "Screenshot_*.gif", "WinSnap_*.png", "WinSnap_*.gif", "WinSnap_pin_*.png" })
+        foreach (string pattern in new[]
+        {
+            "Screenshot_*.png",
+            "Screenshot_*.jpg",
+            "Screenshot_*.jpeg",
+            "Screenshot_*.gif",
+            "WinSnap_*.png",
+            "WinSnap_*.jpg",
+            "WinSnap_*.jpeg",
+            "WinSnap_*.gif",
+            "WinSnap_pin_*.png",
+            "WinSnap_pin_*.jpg",
+            "WinSnap_pin_*.jpeg",
+        })
         {
             foreach (string path in Directory.EnumerateFiles(dir, pattern))
             {
