@@ -161,7 +161,7 @@ public sealed class CaptureController
         }
     }
 
-    private void OnPinRequested(BitmapSource image, CapturedImage captured, int x, int y)
+    private void OnPinRequested(BitmapSource image, CapturedImage? captured, int x, int y)
         => _pinManager.Pin(image, captured, x, y);
 
     private async void OnLongCaptureConfirmed(int x, int y, int w, int h)

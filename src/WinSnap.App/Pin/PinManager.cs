@@ -11,7 +11,11 @@ namespace WinSnap.App.Pin;
 /// </summary>
 public sealed class PinManager
 {
+    private const int DefaultMaxPinnedWindows = 20;
     private readonly List<PinWindow> _windows = new();
+
+    /// <summary>钉图软上限；小于等于 0 表示不限制。超过时自动关闭最早的钉图。</summary>
+    public int MaxPinnedWindows { get; init; } = DefaultMaxPinnedWindows;
 
     /// <summary>当前打开的钉图窗口数量。</summary>
     public int Count => _windows.Count;
@@ -28,6 +32,7 @@ public sealed class PinManager
     {
         ArgumentNullException.ThrowIfNull(image);
 
+        TrimToCapacityForNewPin();
         var window = new PinWindow(image, captured, physicalX, physicalY);
         window.PinClosed += OnPinClosed;
         _windows.Add(window);
@@ -50,6 +55,20 @@ public sealed class PinManager
         {
             window.PinClosed -= OnPinClosed;
             _windows.Remove(window);
+        }
+    }
+
+    private void TrimToCapacityForNewPin()
+    {
+        if (MaxPinnedWindows <= 0)
+            return;
+
+        while (_windows.Count >= MaxPinnedWindows)
+        {
+            var oldest = _windows[0];
+            oldest.PinClosed -= OnPinClosed;
+            _windows.RemoveAt(0);
+            oldest.Close();
         }
     }
 }

@@ -1,4 +1,3 @@
-using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -35,7 +34,7 @@ public partial class PinWindow : Window
     private readonly int _pixelWidth;   // 图像物理像素宽
     private readonly int _pixelHeight;  // 图像物理像素高
 
-    private CapturedImage? _captured;   // 复制到剪贴板用；缺省时按需从 _image 转出
+    private readonly CapturedImage? _captured; // 复制到剪贴板用；缺省时直接从 _image 逐行写入
     private double _dpiScale = 1.0;     // 本窗口所在显示器的 DPI 缩放（device/DIU）
     private double _userScale = 1.0;    // 用户缩放因子（滚轮）
     private int _physicalX;             // 当前窗口左上角物理像素 X
@@ -276,17 +275,20 @@ public partial class PinWindow : Window
     {
         try
         {
-            var captured = _captured ??= ToCapturedImage(_image);
             string? tempPng = TempFileCleaner.BuildTempPath("png");
             try
             {
-                File.WriteAllBytes(tempPng, ClipboardHelper.EncodePng(captured));
+                ImageSaver.Save(_image, tempPng);
             }
             catch
             {
                 tempPng = null; // PNG 落盘失败不阻断复制，仅缺 CF_HDROP（粘贴成文件）
             }
-            ClipboardHelper.CopyImage(captured, tempPng);
+
+            if (_captured is not null)
+                ClipboardHelper.CopyImage(_captured, tempPng);
+            else
+                CopyBitmapSourceToClipboard(_image, tempPng);
         }
         catch (Exception ex)
         {
@@ -320,19 +322,24 @@ public partial class PinWindow : Window
         }
     }
 
-    /// <summary>把 WPF 位图转为 <see cref="CapturedImage"/>（Bgra32，top-down，Stride=Width*4）。</summary>
-    private static CapturedImage ToCapturedImage(BitmapSource src)
+    private static void CopyBitmapSourceToClipboard(BitmapSource src, string? tempPng)
     {
-        BitmapSource bgra = src.Format == PixelFormats.Bgra32
+        BitmapSource source = src.Format == PixelFormats.Bgra32
             ? src
             : new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
 
-        int w = bgra.PixelWidth;
-        int h = bgra.PixelHeight;
-        int stride = w * 4;
-        var pixels = new byte[stride * h];
-        bgra.CopyPixels(pixels, stride, 0);
-        return new CapturedImage(w, h, pixels);
+        int width = source.PixelWidth;
+        int stride = checked(width * 4);
+        ClipboardHelper.CopyImage(
+            width,
+            source.PixelHeight,
+            (sourceRow, destination, destinationStride) =>
+                source.CopyPixels(
+                    new Int32Rect(0, sourceRow, width, 1),
+                    destination,
+                    destinationStride,
+                    stride),
+            tempPng);
     }
 
     // ---------------------------------------------------------------------

@@ -28,6 +28,8 @@ public static class ClipboardHelper
     private const uint GMEM_ZEROINIT = 0x0040;
     private const uint GHND = GMEM_MOVEABLE | GMEM_ZEROINIT;
 
+    public delegate void CopyBgraRow(int sourceRow, IntPtr destination, int destinationStride);
+
     /// <summary>把图像写入剪贴板（CF_DIBV5 + 可选 CF_HDROP）。线程须为 STA。</summary>
     public static void CopyImage(CapturedImage image, string? filePath = null)
     {
@@ -43,6 +45,32 @@ public static class ClipboardHelper
             // 关键：绝不自己写 CF_BITMAP —— 自写的 HBITMAP 是本进程 GDI 句柄，跨进程读取时失效，
             // 而 CF_BITMAP 优先级最高，会让 Clipboard.GetImage()（Claude Code 等据此读图）直接返回 NULL。
             SetDibV5Format(image);
+            if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+                SetHDropFormat(filePath);
+        }
+        finally
+        {
+            CloseClipboard();
+        }
+    }
+
+    /// <summary>
+    /// 从调用方提供的逐行 BGRA 写入器复制图像到剪贴板，避免先构造完整托管 <see cref="CapturedImage"/>。
+    /// 行写入器接收 top-down 源行号，必须向目标指针写入 destinationStride 字节 BGRA 数据。
+    /// </summary>
+    public static void CopyImage(int width, int height, CopyBgraRow copyRow, string? filePath = null)
+    {
+        ArgumentNullException.ThrowIfNull(copyRow);
+        if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+
+        if (!OpenClipboardWithRetry(IntPtr.Zero))
+            throw new InvalidOperationException("无法打开剪贴板（可能被其它进程占用）。");
+
+        try
+        {
+            EmptyClipboard();
+            SetDibV5Format(width, height, copyRow);
             if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
                 SetHDropFormat(filePath);
         }
@@ -124,12 +152,27 @@ public static class ClipboardHelper
         if (width <= 0 || height <= 0 || image.PixelsBgra.Length == 0)
             return;
 
+        int stride = checked(width * 4);
+        int pixelBytes = checked(stride * height);
+        if (image.PixelsBgra.Length < pixelBytes)
+            return;
+
+        SetDibV5Format(width, height, CopyCapturedImageRow);
+        return;
+
+        void CopyCapturedImageRow(int sourceRow, IntPtr destination, int destinationStride)
+        {
+            int srcOffset = checked(sourceRow * image.Stride);
+            Marshal.Copy(image.PixelsBgra, srcOffset, destination, Math.Min(destinationStride, image.Stride));
+        }
+    }
+
+    private static unsafe void SetDibV5Format(int width, int height, CopyBgraRow copyRow)
+    {
         const int headerSize = 124;
         int stride = checked(width * 4);
         int pixelBytes = checked(stride * height);
         int totalBytes = checked(headerSize + pixelBytes);
-        if (image.PixelsBgra.Length < pixelBytes)
-            return;
 
         IntPtr hGlobal = GlobalAlloc(GHND, (UIntPtr)totalBytes);
         if (hGlobal == IntPtr.Zero)
@@ -145,18 +188,13 @@ public static class ClipboardHelper
             {
                 var destination = new Span<byte>((void*)ptr, totalBytes);
                 WriteDibV5Header(destination[..headerSize], width, height, pixelBytes);
-                fixed (byte* srcBase = image.PixelsBgra)
+                byte* dstBase = (byte*)ptr + headerSize;
+                for (int y = 0; y < height; y++)
                 {
-                    byte* dstBase = (byte*)ptr + headerSize;
-                    int copyBytes = Math.Min(stride, image.Stride);
-                    for (int y = 0; y < height; y++)
-                    {
-                        byte* srcRow = srcBase + ((height - 1 - y) * image.Stride);
-                        byte* dstRow = dstBase + (y * stride);
-                        Buffer.MemoryCopy(srcRow, dstRow, stride, copyBytes);
-                        for (int a = 3; a < stride; a += 4)
-                            dstRow[a] = 0xFF;
-                    }
+                    byte* dstRow = dstBase + (y * stride);
+                    copyRow(height - 1 - y, (IntPtr)dstRow, stride);
+                    for (int a = 3; a < stride; a += 4)
+                        dstRow[a] = 0xFF;
                 }
             }
             finally

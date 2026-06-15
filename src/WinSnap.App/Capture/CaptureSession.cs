@@ -102,7 +102,7 @@ public sealed class CaptureSession
     public event Action? Closed;
 
     /// <summary>请求把选区钉到屏幕（合成图、原始裁剪、选区左上物理坐标）。</summary>
-    public event Action<BitmapSource, CapturedImage, int, int>? PinRequested;
+    public event Action<BitmapSource, CapturedImage?, int, int>? PinRequested;
 
     /// <summary>长截图模式下确认选区（选区物理矩形 x,y,w,h）。</summary>
     public event Action<int, int, int, int>? LongCaptureConfirmed;
@@ -581,15 +581,6 @@ public sealed class CaptureSession
         return rtb;
     }
 
-    private static CapturedImage ToCaptured(BitmapSource bmp)
-    {
-        BitmapSource src = bmp.Format == PixelFormats.Bgra32 ? bmp : new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
-        int w = src.PixelWidth, h = src.PixelHeight, stride = w * 4;
-        var buf = new byte[stride * h];
-        src.CopyPixels(buf, stride, 0);
-        return new CapturedImage(w, h, buf);
-    }
-
     public void DoCopy()
     {
         if (!HasSelection) { Cancel(); return; }
@@ -622,7 +613,7 @@ public sealed class CaptureSession
             }
             catch { tempPath = null; }
 
-            ClipboardHelper.CopyImage(ToCaptured(final), tempPath);
+            CopyBitmapSourceToClipboard(final, tempPath);
             Log.Information("已复制选区到剪贴板：{W}x{H}，附带文件={F}", final.PixelWidth, final.PixelHeight, tempPath ?? "无");
         }
         catch (Exception ex)
@@ -680,9 +671,29 @@ public sealed class CaptureSession
     {
         if (!HasSelection) return;
         var final = RenderFinal();
-        PinRequested?.Invoke(final, ToCaptured(final),
+        PinRequested?.Invoke(final, null,
             (int)Math.Round(Selection.X), (int)Math.Round(Selection.Y));
         Cancel();
+    }
+
+    private static void CopyBitmapSourceToClipboard(BitmapSource bmp, string? tempPath)
+    {
+        BitmapSource source = bmp.Format == PixelFormats.Bgra32
+            ? bmp
+            : new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
+
+        int width = source.PixelWidth;
+        int stride = checked(width * 4);
+        ClipboardHelper.CopyImage(
+            width,
+            source.PixelHeight,
+            (sourceRow, destination, destinationStride) =>
+                source.CopyPixels(
+                    new Int32Rect(0, sourceRow, width, 1),
+                    destination,
+                    destinationStride,
+                    stride),
+            tempPath);
     }
 
     private static string NormalizeSaveFormat(string? format)
