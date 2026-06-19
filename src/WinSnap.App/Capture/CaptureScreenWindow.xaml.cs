@@ -21,12 +21,18 @@ namespace WinSnap.App.Capture;
 public partial class CaptureScreenWindow : Window
 {
     private const int WmEraseBackground = 0x0014;
+    private const int WmMouseActivate = 0x0021;
     private const int WmNcCalcSize = 0x0083;
+    private const int MaNoActivate = 3;
+    private const int CompositionFramesBeforeReveal = 2;
+    private const int CursorReleaseGuardTicks = 40;
     private static readonly IntPtr EraseBackgroundHandled = new(1);
 
     private readonly CaptureSession _session;
     private readonly BitmapSource _fullBackground;
     private readonly BitmapSource _normalBackground;
+    private readonly bool _useTransparentLiveOverlay;
+    private byte[]? _nativeFirstPaintPixels;
     private readonly Rectangle[] _handles = new Rectangle[8];
     private readonly RectangleGeometry _selectionClip = new();
     private readonly AnnotationCanvas _annotations = new();
@@ -40,20 +46,38 @@ public partial class CaptureScreenWindow : Window
     private double _toolbarStartLeft;
     private double _toolbarStartTop;
     private bool _pointerMoveQueued;
+    private int _compositionFramesRemaining;
+    private int _cursorReleaseTicksRemaining;
     private Point _queuedPointer;
     private HwndSource? _hwndSource;
+    private DispatcherTimer? _cursorReleaseTimer;
 
     public MonitorInfo Monitor { get; }
 
     public event EventHandler? FirstFrameRendered;
 
-    public CaptureScreenWindow(CaptureSession session, MonitorInfo monitor, BitmapSource fullBackground)
+    public CaptureScreenWindow(
+        CaptureSession session,
+        MonitorInfo monitor,
+        BitmapSource fullBackground,
+        bool useTransparentLiveOverlay = false)
     {
         InitializeComponent();
         _session = session;
         Monitor = monitor;
         _fullBackground = fullBackground;
+        _useTransparentLiveOverlay = useTransparentLiveOverlay;
         _scale = monitor.Scale <= 0 ? 1.0 : monitor.Scale;
+        if (_useTransparentLiveOverlay)
+        {
+            var hitTestBrush = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
+            hitTestBrush.Freeze();
+            AllowsTransparency = true;
+            Background = hitTestBrush;
+            RootGrid.Background = hitTestBrush;
+            RootCanvas.Background = hitTestBrush;
+            BackgroundImage.Visibility = Visibility.Collapsed;
+        }
 
         var offscreen = GetOffscreenPosition();
         Left = offscreen.X / _scale;
@@ -68,8 +92,23 @@ public partial class CaptureScreenWindow : Window
             new Int32Rect(monitor.X - vs.X, monitor.Y - vs.Y, monitor.Width, monitor.Height));
         background.Freeze();
         _normalBackground = background;
-        BackgroundImage.Source = _normalBackground;
-        SelectionImage.Source = _normalBackground;
+        if (!_useTransparentLiveOverlay)
+        {
+            _nativeFirstPaintPixels = CreateNativePaintBuffer(_normalBackground);
+            var backgroundBrush = new ImageBrush(_normalBackground)
+            {
+                Stretch = Stretch.Fill,
+                AlignmentX = AlignmentX.Left,
+                AlignmentY = AlignmentY.Top,
+            };
+            if (backgroundBrush.CanFreeze)
+                backgroundBrush.Freeze();
+            Background = backgroundBrush;
+            RootGrid.Background = backgroundBrush;
+            RootCanvas.Background = backgroundBrush;
+            BackgroundImage.Source = _normalBackground;
+            BackgroundImage.Visibility = Visibility.Visible;
+        }
         RootCanvas.Width = Monitor.Width;
         RootCanvas.Height = Monitor.Height;
         BackgroundImage.Width = Monitor.Width;
@@ -156,9 +195,13 @@ public partial class CaptureScreenWindow : Window
         var hwnd = new WindowInteropHelper(this).Handle;
         _hwndSource = HwndSource.FromHwnd(hwnd);
         _hwndSource?.AddHook(WindowMessageHook);
+        if (!_useTransparentLiveOverlay && _hwndSource?.CompositionTarget is { } compositionTarget)
+            compositionTarget.BackgroundColor = SampleNativePaintColor();
 
         var offscreen = GetOffscreenPosition();
-        ScreenWindowHelper.PositionTopmost(hwnd, offscreen.X, offscreen.Y, Monitor.Width, Monitor.Height);
+        ScreenWindowHelper.PositionTopmost(hwnd, offscreen.X, offscreen.Y, Monitor.Width, Monitor.Height, showWindow: false);
+        if (!_useTransparentLiveOverlay && _nativeFirstPaintPixels is { } pixels)
+            ScreenWindowHelper.PaintBgra32ToWindow(hwnd, pixels, Monitor.Width, Monitor.Height);
 
         RenderState();
     }
@@ -171,22 +214,59 @@ public partial class CaptureScreenWindow : Window
             return;
 
         _firstFrameReported = true;
+        _compositionFramesRemaining = CompositionFramesBeforeReveal;
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_hwndSource is null)
+                return;
+
+            CompositionTarget.Rendering += OnFirstCompositionRendering;
+        }), DispatcherPriority.Render);
+    }
+
+    private void OnFirstCompositionRendering(object? sender, EventArgs e)
+    {
+        if (_hwndSource is null)
+        {
+            CompositionTarget.Rendering -= OnFirstCompositionRendering;
+            return;
+        }
+
+        if (--_compositionFramesRemaining > 0)
+            return;
+
+        CompositionTarget.Rendering -= OnFirstCompositionRendering;
+
         ScreenWindowHelper.FlushDwm();
         FirstFrameRendered?.Invoke(this, EventArgs.Empty);
     }
 
     public void Reveal()
     {
+        UpdateLayout();
         var hwnd = new WindowInteropHelper(this).Handle;
         if (hwnd != IntPtr.Zero)
-            ScreenWindowHelper.PositionTopmost(hwnd, Monitor.X, Monitor.Y, Monitor.Width, Monitor.Height, showWindow: false);
+        {
+            ScreenWindowHelper.PositionTopmost(
+                hwnd,
+                Monitor.X,
+                Monitor.Y,
+                Monitor.Width,
+                Monitor.Height,
+                showWindow: false,
+                suppressRedraw: true);
+        }
+
+        _ = Dispatcher.BeginInvoke(
+            new Action(ReleaseNativeFirstPaintBuffer),
+            DispatcherPriority.ApplicationIdle);
+        StartCursorReleaseGuard();
     }
 
     public void ActivateForInput()
     {
-        var hwnd = new WindowInteropHelper(this).Handle;
-        ScreenWindowHelper.ActivateForInput(hwnd);
-        Activate();
+        ScreenWindowHelper.ReleaseCursorConstraints();
+        StartCursorReleaseGuard();
         Focus();
     }
 
@@ -199,10 +279,13 @@ public partial class CaptureScreenWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _pointerMoveQueued = false;
+        CompositionTarget.Rendering -= OnFirstCompositionRendering;
+        StopCursorReleaseGuard();
         _hwndSource?.RemoveHook(WindowMessageHook);
         _hwndSource = null;
         BackgroundImage.Source = null;
         SelectionImage.Source = null;
+        ReleaseNativeFirstPaintBuffer();
         SelectionImage.Clip = null;
         Magnifier.Clear();
         _annotations.SetPreview(null);
@@ -213,19 +296,104 @@ public partial class CaptureScreenWindow : Window
         base.OnClosed(e);
     }
 
-    private static IntPtr WindowMessageHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    private IntPtr WindowMessageHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         switch (msg)
         {
             case WmEraseBackground:
+                if (!_useTransparentLiveOverlay && _nativeFirstPaintPixels is { } pixels)
+                    ScreenWindowHelper.PaintBgra32ToDevice(wParam, pixels, Monitor.Width, Monitor.Height);
                 handled = true;
                 return EraseBackgroundHandled;
+            case WmMouseActivate:
+                handled = true;
+                return new IntPtr(MaNoActivate);
             case WmNcCalcSize:
                 handled = true;
                 return IntPtr.Zero;
             default:
                 return IntPtr.Zero;
         }
+    }
+
+    private static byte[] CreateNativePaintBuffer(BitmapSource source)
+    {
+        BitmapSource paintSource = source;
+        if (source.Format != PixelFormats.Bgr32 &&
+            source.Format != PixelFormats.Bgra32 &&
+            source.Format != PixelFormats.Pbgra32)
+        {
+            var converted = new FormatConvertedBitmap(source, PixelFormats.Bgr32, null, 0);
+            converted.Freeze();
+            paintSource = converted;
+        }
+
+        int stride = checked(paintSource.PixelWidth * 4);
+        var pixels = new byte[checked(stride * paintSource.PixelHeight)];
+        paintSource.CopyPixels(pixels, stride, 0);
+        return pixels;
+    }
+
+    private Color SampleNativePaintColor()
+    {
+        if (_nativeFirstPaintPixels is null || _nativeFirstPaintPixels.Length < 4)
+            return Colors.Black;
+
+        int x = Math.Clamp(Monitor.Width / 2, 0, Monitor.Width - 1);
+        int y = Math.Clamp(Monitor.Height / 2, 0, Monitor.Height - 1);
+        int offset = checked(((y * Monitor.Width) + x) * 4);
+        if (offset + 2 >= _nativeFirstPaintPixels.Length)
+            return Colors.Black;
+
+        return Color.FromRgb(
+            _nativeFirstPaintPixels[offset + 2],
+            _nativeFirstPaintPixels[offset + 1],
+            _nativeFirstPaintPixels[offset]);
+    }
+
+    private void ReleaseNativeFirstPaintBuffer()
+        => _nativeFirstPaintPixels = null;
+
+    private void StartCursorReleaseGuard()
+    {
+        _cursorReleaseTicksRemaining = CursorReleaseGuardTicks;
+        ScreenWindowHelper.ReleaseCursorConstraints();
+
+        if (_cursorReleaseTimer is not null)
+        {
+            if (!_cursorReleaseTimer.IsEnabled)
+                _cursorReleaseTimer.Start();
+            return;
+        }
+
+        _cursorReleaseTimer = new DispatcherTimer(DispatcherPriority.Send, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(50),
+        };
+        _cursorReleaseTimer.Tick += OnCursorReleaseTimerTick;
+        _cursorReleaseTimer.Start();
+    }
+
+    private void OnCursorReleaseTimerTick(object? sender, EventArgs e)
+    {
+        if (_cursorReleaseTicksRemaining-- <= 0)
+        {
+            StopCursorReleaseGuard();
+            return;
+        }
+
+        ScreenWindowHelper.ReleaseCursorConstraints();
+    }
+
+    private void StopCursorReleaseGuard()
+    {
+        if (_cursorReleaseTimer is null)
+            return;
+
+        _cursorReleaseTimer.Stop();
+        _cursorReleaseTimer.Tick -= OnCursorReleaseTimerTick;
+        _cursorReleaseTimer = null;
+        _cursorReleaseTicksRemaining = 0;
     }
 
     private static Point CursorPoint()
@@ -238,6 +406,9 @@ public partial class CaptureScreenWindow : Window
 
     protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
     {
+        if (IsOverlayControlSource(e.OriginalSource as DependencyObject))
+            return;
+
         CaptureMouse();
         _session.PointerDown(CursorPoint(), e.ClickCount, this);
         e.Handled = true;
@@ -245,6 +416,9 @@ public partial class CaptureScreenWindow : Window
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        if (IsOverlayControlSource(e.OriginalSource as DependencyObject))
+            return;
+
         _queuedPointer = CursorPoint();
 
         if (_pointerMoveQueued)
@@ -265,6 +439,9 @@ public partial class CaptureScreenWindow : Window
 
     protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
     {
+        if (IsOverlayControlSource(e.OriginalSource as DependencyObject))
+            return;
+
         ReleaseMouseCapture();
         _session.PointerUp(CursorPoint());
         e.Handled = true;
@@ -365,6 +542,7 @@ public partial class CaptureScreenWindow : Window
 
         if (right > left && bottom > top)
         {
+            SelectionImage.Source ??= _normalBackground;
             _selectionClip.Rect = new Rect(left, top, right - left, bottom - top);
             if (!ReferenceEquals(SelectionImage.Clip, _selectionClip))
                 SelectionImage.Clip = _selectionClip;
@@ -385,6 +563,7 @@ public partial class CaptureScreenWindow : Window
         }
 
         SelectionImage.Visibility = Visibility.Collapsed;
+        SelectionImage.Source = null;
     }
 
     private void ShowDimmedBackground()
@@ -528,6 +707,17 @@ public partial class CaptureScreenWindow : Window
         for (DependencyObject? current = source; current is not null; current = VisualTreeHelper.GetParent(current))
         {
             if (ReferenceEquals(current, ancestor))
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool IsOverlayControlSource(DependencyObject? source)
+    {
+        for (DependencyObject? current = source; current is not null; current = VisualTreeHelper.GetParent(current))
+        {
+            if (ReferenceEquals(current, Toolbar) || ReferenceEquals(current, TextInputBox))
                 return true;
         }
 

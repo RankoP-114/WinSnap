@@ -95,6 +95,7 @@ internal static class NativeMethods
     public static extern int DwmFlush();
 
     public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public const uint SWP_NOREDRAW = 0x0008;
     public const uint SWP_NOACTIVATE = 0x0010;
     public const uint SWP_SHOWWINDOW = 0x0040;
 }

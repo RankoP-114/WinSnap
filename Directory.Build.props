@@ -4,7 +4,7 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.1.33</Version>
+    <Version>0.1.43</Version>
     <Authors>WinSnap</Authors>
     <Product>WinSnap</Product>
     <Company>WinSnap</Company>

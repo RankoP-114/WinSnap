@@ -54,6 +54,68 @@ public class GifCaptureServiceEncodingTests
         }
     }
 
+    [Fact]
+    public void ReusableGdiFrameBuffers_RentAvoidsFrameStillWaitingForEncoding()
+    {
+        using var buffers = new GifCaptureService.ReusableGdiFrameBuffers(width: 3, height: 2);
+
+        byte[] first = buffers.Rent(protectedFrame: null);
+        var protectedFrame = new CapturedImage(3, 2, first);
+        byte[] second = buffers.Rent(protectedFrame);
+        byte[] firstAgain = buffers.Rent(new CapturedImage(3, 2, second));
+
+        Assert.True(first.Length >= 3 * 2 * 4);
+        Assert.True(second.Length >= 3 * 2 * 4);
+        Assert.NotSame(first, second);
+        Assert.Same(first, firstAgain);
+    }
+
+    [Fact]
+    public void ReusableGdiFrameBuffers_RentAfterDisposeThrows()
+    {
+        var buffers = new GifCaptureService.ReusableGdiFrameBuffers(width: 3, height: 2);
+        buffers.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => buffers.Rent(protectedFrame: null));
+    }
+
+    [Fact]
+    public void ReusableRegionCanvas_RentAvoidsFrameStillWaitingForEncoding()
+    {
+        using var buffers = new DuplicationCapture.ReusableRegionCanvas(width: 3, height: 2);
+
+        byte[] first = buffers.Rent(protectedFrame: null);
+        var protectedFrame = new CapturedImage(3, 2, first);
+        byte[] second = buffers.Rent(protectedFrame);
+        byte[] firstAgain = buffers.Rent(new CapturedImage(3, 2, second));
+
+        Assert.True(first.Length >= 3 * 2 * 4);
+        Assert.True(second.Length >= 3 * 2 * 4);
+        Assert.NotSame(first, second);
+        Assert.Same(first, firstAgain);
+    }
+
+    [Fact]
+    public void ReusableRegionCanvas_RentAfterDisposeThrows()
+    {
+        var buffers = new DuplicationCapture.ReusableRegionCanvas(width: 3, height: 2);
+        buffers.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => buffers.Rent(protectedFrame: null));
+    }
+
+    [Fact]
+    public void DuplicationCapture_GetOutputBuffer_UsesReusablePatchFactory()
+    {
+        byte[] reusable = new byte[3 * 2 * 4];
+        var method = typeof(DuplicationCapture).GetMethod("GetOutputBuffer", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var result = Assert.IsType<byte[]>(method.Invoke(null, [3, 2, new Func<int, int, byte[]>((_, _) => reusable)]));
+
+        Assert.Same(reusable, result);
+    }
+
     private static CapturedImage CreateQuantizedStressImage(int width, int height)
     {
         byte[] bgra = new byte[checked(width * height * 4)];

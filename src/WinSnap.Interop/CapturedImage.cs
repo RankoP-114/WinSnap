@@ -15,6 +15,18 @@ public sealed class CapturedImage
 
     public CapturedImage(int width, int height, byte[] pixelsBgra, IReadOnlyList<string>? diagnostics = null)
     {
+        if (width < 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (height < 0) throw new ArgumentOutOfRangeException(nameof(height));
+        ArgumentNullException.ThrowIfNull(pixelsBgra);
+
+        long expectedBytes = (long)width * height * 4;
+        if (expectedBytes > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(width), $"图像过大，无法用单个 BGRA 缓冲表示：{width}x{height}。");
+        if (pixelsBgra.LongLength < expectedBytes)
+            throw new ArgumentException(
+                $"BGRA 缓冲区太小，应至少为 {expectedBytes} 字节，实际 {pixelsBgra.LongLength} 字节。",
+                nameof(pixelsBgra));
+
         Width = width;
         Height = height;
         PixelsBgra = pixelsBgra;

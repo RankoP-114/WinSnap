@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace WinSnap.Core.Imaging;
 
 /// <summary>
@@ -20,6 +22,9 @@ public sealed class ToneMapper
 {
     private const double ScrgbWhiteNits = 80.0; // scRGB: 线性 1.0 == 80 nits
     private const double KneeStart = 0.95;
+    private const int SrgbOetfLookupMax = 65535;
+    private static readonly byte[] SrgbOetfByteLookup = BuildSrgbOetfByteLookup();
+    private static readonly float[] HalfToFloatLookup = BuildHalfToFloatLookup();
 
     /// <summary>默认 SDR 参考白亮度（nits）。</summary>
     public const double DefaultSdrWhiteNits = 300.0;
@@ -84,28 +89,155 @@ public sealed class ToneMapper
             throw new ArgumentException(
                 $"输入长度应为 {expected}（{width}x{height}*4），实际 {scRgbaLinear.Length}。",
                 nameof(scRgbaLinear));
+        if (expected > int.MaxValue)
+            throw new InvalidOperationException($"HDR 图像过大，无法展开为 SDR 缓冲：{width}x{height}。");
+
+        var dst = new byte[(int)expected];
+        MapToSdrBgra(scRgbaLinear, dst, width, height, sdrWhiteNits, hdrPeakNits, inputIsRec2020);
+        return dst;
+    }
+
+    /// <summary>
+    /// 把一整幅 scRGB 线性像素映射并写入调用方提供的 BGRA 缓冲，避免额外分配输出数组。
+    /// </summary>
+    public void MapToSdrBgra(
+        ReadOnlySpan<float> scRgbaLinear,
+        Span<byte> destinationBgra,
+        int width,
+        int height,
+        double sdrWhiteNits = DefaultSdrWhiteNits,
+        double hdrPeakNits = DefaultHdrPeakNits,
+        bool inputIsRec2020 = true)
+    {
+        if (width < 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (height < 0) throw new ArgumentOutOfRangeException(nameof(height));
+        long expected = (long)width * height * 4;
+        if (expected > int.MaxValue)
+            throw new InvalidOperationException($"HDR 图像过大，无法展开为 SDR 缓冲：{width}x{height}。");
+        if (scRgbaLinear.Length != expected)
+            throw new ArgumentException(
+                $"输入长度应为 {expected}（{width}x{height}*4），实际 {scRgbaLinear.Length}。",
+                nameof(scRgbaLinear));
+        if (destinationBgra.Length < expected)
+            throw new ArgumentException("目标 BGRA 缓冲区太小。", nameof(destinationBgra));
+
         var parameters = CreateMappingParameters(sdrWhiteNits, hdrPeakNits, inputIsRec2020, BlackBoost);
+        MapScRgbPixelsToSdrBgra(scRgbaLinear, destinationBgra[..(int)expected], parameters);
+    }
 
-        var dst = new byte[expected];
+    /// <summary>使用预计算参数批量映射 scRGB 像素到 SDR BGRA。输入/输出均为紧密 RGBA/BGRA 排列。</summary>
+    public static void MapScRgbPixelsToSdrBgra(
+        ReadOnlySpan<float> scRgbaLinear,
+        Span<byte> destinationBgra,
+        MappingParameters parameters)
+    {
+        if (scRgbaLinear.Length % 4 != 0)
+            throw new ArgumentException("输入 RGBA 缓冲长度必须是 4 的倍数。", nameof(scRgbaLinear));
+        if (destinationBgra.Length < scRgbaLinear.Length)
+            throw new ArgumentException("目标 BGRA 缓冲区太小。", nameof(destinationBgra));
 
-        int pixelCount = width * height;
+        if (parameters.InputIsRec2020)
+            MapScRgbPixelsToSdrBgraRec2020(scRgbaLinear, destinationBgra, parameters);
+        else
+            MapScRgbPixelsToSdrBgra709(scRgbaLinear, destinationBgra, parameters);
+    }
+
+    /// <summary>使用预计算参数批量映射 FP16 scRGB 像素到 SDR BGRA。输入/输出均为紧密 RGBA/BGRA 排列。</summary>
+    public static void MapScRgbHalfPixelsToSdrBgra(
+        ReadOnlySpan<Half> scRgbaLinear,
+        Span<byte> destinationBgra,
+        MappingParameters parameters)
+    {
+        if (scRgbaLinear.Length % 4 != 0)
+            throw new ArgumentException("输入 FP16 RGBA 缓冲长度必须是 4 的倍数。", nameof(scRgbaLinear));
+        if (destinationBgra.Length < scRgbaLinear.Length)
+            throw new ArgumentException("目标 BGRA 缓冲区太小。", nameof(destinationBgra));
+
+        ReadOnlySpan<ushort> halfBits = MemoryMarshal.Cast<Half, ushort>(scRgbaLinear);
+        if (parameters.InputIsRec2020)
+            MapScRgbHalfPixelsToSdrBgraRec2020(halfBits, destinationBgra, parameters);
+        else
+            MapScRgbHalfPixelsToSdrBgra709(halfBits, destinationBgra, parameters);
+    }
+
+    private static void MapScRgbPixelsToSdrBgra709(
+        ReadOnlySpan<float> scRgbaLinear,
+        Span<byte> destinationBgra,
+        MappingParameters parameters)
+    {
+        int pixelCount = scRgbaLinear.Length / 4;
         for (int i = 0; i < pixelCount; i++)
         {
             int s = i * 4;
-            var (b, g, r, a) = MapScRgbPixelToSdrBgraCore(
+            WriteScRgbPixelToSdrBgra709(
                 scRgbaLinear[s],
                 scRgbaLinear[s + 1],
                 scRgbaLinear[s + 2],
                 scRgbaLinear[s + 3],
-                parameters);
-
-            dst[s] = b;
-            dst[s + 1] = g;
-            dst[s + 2] = r;
-            dst[s + 3] = a;
+                parameters,
+                destinationBgra,
+                s);
         }
+    }
 
-        return dst;
+    private static void MapScRgbPixelsToSdrBgraRec2020(
+        ReadOnlySpan<float> scRgbaLinear,
+        Span<byte> destinationBgra,
+        MappingParameters parameters)
+    {
+        int pixelCount = scRgbaLinear.Length / 4;
+        for (int i = 0; i < pixelCount; i++)
+        {
+            int s = i * 4;
+            WriteScRgbPixelToSdrBgraRec2020(
+                scRgbaLinear[s],
+                scRgbaLinear[s + 1],
+                scRgbaLinear[s + 2],
+                scRgbaLinear[s + 3],
+                parameters,
+                destinationBgra,
+                s);
+        }
+    }
+
+    private static void MapScRgbHalfPixelsToSdrBgra709(
+        ReadOnlySpan<ushort> halfBits,
+        Span<byte> destinationBgra,
+        MappingParameters parameters)
+    {
+        int pixelCount = halfBits.Length / 4;
+        for (int i = 0; i < pixelCount; i++)
+        {
+            int s = i * 4;
+            WriteScRgbPixelToSdrBgra709(
+                HalfToFloatLookup[halfBits[s]],
+                HalfToFloatLookup[halfBits[s + 1]],
+                HalfToFloatLookup[halfBits[s + 2]],
+                HalfToFloatLookup[halfBits[s + 3]],
+                parameters,
+                destinationBgra,
+                s);
+        }
+    }
+
+    private static void MapScRgbHalfPixelsToSdrBgraRec2020(
+        ReadOnlySpan<ushort> halfBits,
+        Span<byte> destinationBgra,
+        MappingParameters parameters)
+    {
+        int pixelCount = halfBits.Length / 4;
+        for (int i = 0; i < pixelCount; i++)
+        {
+            int s = i * 4;
+            WriteScRgbPixelToSdrBgraRec2020(
+                HalfToFloatLookup[halfBits[s]],
+                HalfToFloatLookup[halfBits[s + 1]],
+                HalfToFloatLookup[halfBits[s + 2]],
+                HalfToFloatLookup[halfBits[s + 3]],
+                parameters,
+                destinationBgra,
+                s);
+        }
     }
 
     /// <summary>
@@ -142,6 +274,24 @@ public sealed class ToneMapper
         return MapScRgbPixelToSdrBgraCore(rLinear, gLinear, bLinear, aLinear, parameters);
     }
 
+    /// <summary>使用预计算参数映射单个 scRGB 像素，并直接写入 4 字节 BGRA 缓冲。</summary>
+    public static void MapScRgbPixelToSdrBgra(
+        float rLinear,
+        float gLinear,
+        float bLinear,
+        float aLinear,
+        MappingParameters parameters,
+        Span<byte> destinationBgra)
+    {
+        if (destinationBgra.Length < 4)
+            throw new ArgumentException("目标 BGRA 缓冲区太小。", nameof(destinationBgra));
+
+        if (parameters.InputIsRec2020)
+            WriteScRgbPixelToSdrBgraRec2020(rLinear, gLinear, bLinear, aLinear, parameters, destinationBgra, 0);
+        else
+            WriteScRgbPixelToSdrBgra709(rLinear, gLinear, bLinear, aLinear, parameters, destinationBgra, 0);
+    }
+
     private static (byte B, byte G, byte R, byte A) MapScRgbPixelToSdrBgraCore(
         float rLinear,
         float gLinear,
@@ -149,10 +299,59 @@ public sealed class ToneMapper
         float aLinear,
         MappingParameters parameters)
     {
+        Span<byte> bgra = stackalloc byte[4];
+        if (parameters.InputIsRec2020)
+            WriteScRgbPixelToSdrBgraRec2020(rLinear, gLinear, bLinear, aLinear, parameters, bgra, 0);
+        else
+            WriteScRgbPixelToSdrBgra709(rLinear, gLinear, bLinear, aLinear, parameters, bgra, 0);
+
+        return (bgra[0], bgra[1], bgra[2], bgra[3]);
+    }
+
+    private static void WriteScRgbPixelToSdrBgra709(
+        float rLinear,
+        float gLinear,
+        float bLinear,
+        float aLinear,
+        MappingParameters parameters,
+        Span<byte> destinationBgra,
+        int destinationOffset)
+    {
+        MapScRgbToToneMappedRelative(rLinear, gLinear, bLinear, parameters, out double rRel, out double gRel, out double bRel);
+        WriteSdrBgra(rRel, gRel, bRel, aLinear, destinationBgra, destinationOffset);
+    }
+
+    private static void WriteScRgbPixelToSdrBgraRec2020(
+        float rLinear,
+        float gLinear,
+        float bLinear,
+        float aLinear,
+        MappingParameters parameters,
+        Span<byte> destinationBgra,
+        int destinationOffset)
+    {
+        MapScRgbToToneMappedRelative(rLinear, gLinear, bLinear, parameters, out double rRel, out double gRel, out double bRel);
+
+        // Rec.2020 → Rec.709 色域。
+        double r709 = (1.6604910 * rRel) - (0.5876411 * gRel) - (0.0728499 * bRel);
+        double g709 = (-0.1245505 * rRel) + (1.1328999 * gRel) - (0.0083494 * bRel);
+        double b709 = (-0.0181508 * rRel) - (0.1005789 * gRel) + (1.1187297 * bRel);
+        WriteSdrBgra(r709, g709, b709, aLinear, destinationBgra, destinationOffset);
+    }
+
+    private static void MapScRgbToToneMappedRelative(
+        float rLinear,
+        float gLinear,
+        float bLinear,
+        MappingParameters parameters,
+        out double rRel,
+        out double gRel,
+        out double bRel)
+    {
         // ① scRGB → 相对 SDR 白线性（白点 = 1.0）
-        double rRel = ToRelativeSdrWhite(rLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
-        double gRel = ToRelativeSdrWhite(gLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
-        double bRel = ToRelativeSdrWhite(bLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
+        rRel = ToRelativeSdrWhite(rLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
+        gRel = ToRelativeSdrWhite(gLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
+        bRel = ToRelativeSdrWhite(bLinear, parameters.ScaleScrgbToRel, parameters.XPeak);
 
         // ② maxRGB EETF：对峰值通道求肩部压缩增益，等比缩放（保色相）
         double maxRel = Math.Max(rRel, Math.Max(gRel, bRel));
@@ -164,32 +363,21 @@ public sealed class ToneMapper
             gRel *= gain;
             bRel *= gain;
         }
+    }
 
-        // ③ Rec.2020 → Rec.709 色域（仅当输入为 Rec.2020 原色时）。
-        //    DXGI scRGB（inputIsRec2020=false）原色即 Rec.709，跳过矩阵直通。
-        double r709;
-        double g709;
-        double b709;
-        if (parameters.InputIsRec2020)
-        {
-            r709 = (1.6604910 * rRel) - (0.5876411 * gRel) - (0.0728499 * bRel);
-            g709 = (-0.1245505 * rRel) + (1.1328999 * gRel) - (0.0083494 * bRel);
-            b709 = (-0.0181508 * rRel) - (0.1005789 * gRel) + (1.1187297 * bRel);
-        }
-        else
-        {
-            r709 = rRel;
-            g709 = gRel;
-            b709 = bRel;
-        }
-
-        // ④ sRGB OETF → 8bit
-        byte r8 = ToByte(SrgbOetf(Clamp01(r709)));
-        byte g8 = ToByte(SrgbOetf(Clamp01(g709)));
-        byte b8 = ToByte(SrgbOetf(Clamp01(b709)));
-        byte a8 = ToByte(Clamp01OrDefault(aLinear, fallback: 1.0));
-
-        return (b8, g8, r8, a8);
+    private static void WriteSdrBgra(
+        double r709,
+        double g709,
+        double b709,
+        float aLinear,
+        Span<byte> destinationBgra,
+        int destinationOffset)
+    {
+        // sRGB OETF → 8bit
+        destinationBgra[destinationOffset] = ToSrgbByte(b709);
+        destinationBgra[destinationOffset + 1] = ToSrgbByte(g709);
+        destinationBgra[destinationOffset + 2] = ToSrgbByte(r709);
+        destinationBgra[destinationOffset + 3] = ToByte(Clamp01OrDefault(aLinear, fallback: 1.0));
     }
 
     /// <summary>
@@ -233,6 +421,37 @@ public sealed class ToneMapper
         if (c <= 0.0031308) return 12.92 * c;
         if (c >= 1.0) return 1.0;
         return (1.055 * Math.Pow(c, 1.0 / 2.4)) - 0.055;
+    }
+
+    private static byte ToSrgbByte(double linear)
+    {
+        if (double.IsNaN(linear) || linear <= 0.0)
+            return 0;
+        if (double.IsPositiveInfinity(linear) || linear >= 1.0)
+            return 255;
+
+        int index = (int)Math.Round(linear * SrgbOetfLookupMax);
+        return SrgbOetfByteLookup[index];
+    }
+
+    private static byte[] BuildSrgbOetfByteLookup()
+    {
+        var lookup = new byte[SrgbOetfLookupMax + 1];
+        for (int i = 0; i < lookup.Length; i++)
+        {
+            double linear = i / (double)SrgbOetfLookupMax;
+            lookup[i] = ToByte(SrgbOetf(linear));
+        }
+
+        return lookup;
+    }
+
+    private static float[] BuildHalfToFloatLookup()
+    {
+        var lookup = new float[ushort.MaxValue + 1];
+        for (int i = 0; i < lookup.Length; i++)
+            lookup[i] = (float)BitConverter.UInt16BitsToHalf((ushort)i);
+        return lookup;
     }
 
     private static bool IsPositiveFinite(double v)

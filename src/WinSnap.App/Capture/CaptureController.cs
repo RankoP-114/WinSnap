@@ -21,6 +21,8 @@ namespace WinSnap.App.Capture;
 /// </summary>
 public sealed class CaptureController
 {
+    private readonly record struct OverlayCaptureBackground(BitmapSource Source, bool UseTransparentLiveOverlay);
+
     private readonly SettingsService _settings;
     private readonly PinManager _pinManager = new();
     private CaptureSession? _session;
@@ -44,9 +46,10 @@ public sealed class CaptureController
             Log.Information("开始截图：捕获虚拟桌面（GDI 路径）");
             var background = CaptureScreenBitmapSource();
             _session = new CaptureSession(
-                background,
+                background.Source,
                 defaultSaveFormat: CurrentSaveFormat,
-                jpegQuality: CurrentJpegQuality);
+                jpegQuality: CurrentJpegQuality,
+                useTransparentLiveOverlay: background.UseTransparentLiveOverlay);
             _session.PinRequested += OnPinRequested;
             _session.Closed += OnSessionClosed;
             _session.Start();
@@ -71,10 +74,11 @@ public sealed class CaptureController
             Log.Information("开始长截图：先框选要滚动捕获的区域");
             var background = CaptureScreenBitmapSource();
             _session = new CaptureSession(
-                background,
+                background.Source,
                 CaptureSession.SessionMode.LongCapture,
                 CurrentSaveFormat,
-                CurrentJpegQuality);
+                CurrentJpegQuality,
+                background.UseTransparentLiveOverlay);
             _session.LongCaptureConfirmed += OnLongCaptureConfirmed;
             _session.Closed += OnSessionClosed;
             _session.Start();
@@ -99,10 +103,11 @@ public sealed class CaptureController
             Log.Information("开始钉图：先框选要钉到屏幕的区域");
             var background = CaptureScreenBitmapSource();
             _session = new CaptureSession(
-                background,
+                background.Source,
                 CaptureSession.SessionMode.PinCapture,
                 CurrentSaveFormat,
-                CurrentJpegQuality);
+                CurrentJpegQuality,
+                background.UseTransparentLiveOverlay);
             _session.PinRequested += OnPinRequested;
             _session.Closed += OnSessionClosed;
             _session.Start();
@@ -143,10 +148,11 @@ public sealed class CaptureController
                 options.DurationSeconds, options.FramesPerSecond, options.CountdownSeconds);
             var background = CaptureScreenBitmapSource();
             _session = new CaptureSession(
-                background,
+                background.Source,
                 CaptureSession.SessionMode.GifCapture,
                 CurrentSaveFormat,
-                CurrentJpegQuality);
+                CurrentJpegQuality,
+                background.UseTransparentLiveOverlay);
             _session.GifCaptureConfirmed += (x, y, w, h, mode) =>
                 OnGifCaptureConfirmed(x, y, w, h, mode, options);
             _session.Closed += OnSessionClosed;
@@ -294,10 +300,11 @@ public sealed class CaptureController
         => TempFileCleaner.BuildTempPath("gif");
 
     /// <summary>按显示器 HDR 状态和前台全屏状态选择覆盖层背景。</summary>
-    private BitmapSource CaptureScreenBitmapSource()
+    private OverlayCaptureBackground CaptureScreenBitmapSource()
     {
         bool hasHdr = HdrDetector.AnyHdrActive();
         bool foregroundFullscreen = IsForegroundFullscreenLike();
+        bool useTransparentLiveOverlay = hasHdr || foregroundFullscreen;
         bool needsDuplicationFallback = false;
         double hdrSdrWhiteNits = Math.Clamp(
             _settings.Current.HdrSdrWhiteLevelNits,
@@ -313,7 +320,7 @@ public sealed class CaptureController
                 if (ScreenBitmapSourceCapture.HasVisibleContent(gdi))
                 {
                     Log.Information("使用 GDI 捕获覆盖层背景：前台全屏={ForegroundFullscreen}", foregroundFullscreen);
-                    return gdi;
+                    return PrepareOverlayBackground(gdi, useTransparentLiveOverlay);
                 }
 
                 Log.Warning("GDI 捕获结果看起来全黑，改用 Desktop Duplication 兜底");
@@ -349,7 +356,7 @@ public sealed class CaptureController
                 {
                     var gdi = ScreenBitmapSourceCapture.CaptureVirtualScreenGdi();
                     if (ScreenBitmapSourceCapture.HasVisibleContent(gdi))
-                        return gdi;
+                        return PrepareOverlayBackground(gdi, useTransparentLiveOverlay);
                 }
                 catch (Exception ex)
                 {
@@ -363,10 +370,16 @@ public sealed class CaptureController
 
             var source = ImagingHelper.ToBitmapSource(hdr);
             hdr = null;
-            return source;
+            return PrepareOverlayBackground(source, useTransparentLiveOverlay);
         }
 
-        return ScreenBitmapSourceCapture.CaptureVirtualScreenGdi();
+        return PrepareOverlayBackground(ScreenBitmapSourceCapture.CaptureVirtualScreenGdi(), useTransparentLiveOverlay);
+    }
+
+    private static OverlayCaptureBackground PrepareOverlayBackground(BitmapSource source, bool useTransparentLiveOverlay)
+    {
+        MemoryTrimmer.TrimTransientCaptureBuffers();
+        return new OverlayCaptureBackground(source, useTransparentLiveOverlay);
     }
 
     private static bool IsForegroundFullscreenLike()

@@ -1,4 +1,7 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using WinSnap.Core.Primitives;
 
 namespace WinSnap.Core.Stitching;
@@ -19,6 +22,9 @@ namespace WinSnap.Core.Stitching;
 /// </summary>
 public sealed class ScrollStitcher : IDisposable
 {
+    private static readonly Vector128<byte> BgrMask128 = Vector128.Create(0x00FFFFFFu).AsByte();
+    private static readonly Vector256<byte> BgrMask256 = Vector256.Create(0x00FFFFFFu).AsByte();
+
     /// <summary>模板条带高度（像素）。</summary>
     public int TemplateHeight { get; }
 
@@ -172,6 +178,35 @@ public sealed class ScrollStitcher : IDisposable
         return result;
     }
 
+    /// <summary>
+    /// 把当前内部 BGRA 缓冲同步交给调用方创建导出对象，然后立即释放内部缓冲。
+    /// 调用方必须在回调返回前完成拷贝，不得保存传入数组引用。
+    /// </summary>
+    public TResult ExportAndReset<TResult>(Func<int, int, byte[], int, TResult> createFromBgra)
+    {
+        ArgumentNullException.ThrowIfNull(createFromBgra);
+
+        if (_bgra is null || _width == 0 || _height == 0)
+        {
+            Reset();
+            return createFromBgra(0, 0, Array.Empty<byte>(), 0);
+        }
+
+        int width = _width;
+        int height = _height;
+        int stride = checked(width * PixelBuffer.BytesPerPixel);
+        byte[] bgra = _bgra;
+
+        try
+        {
+            return createFromBgra(width, height, bgra, stride);
+        }
+        finally
+        {
+            Reset();
+        }
+    }
+
     /// <summary>重置到初始状态，可复用本实例开始新一次拼接。</summary>
     public void Reset()
     {
@@ -225,6 +260,9 @@ public sealed class ScrollStitcher : IDisposable
 
             for (int m = 0; m <= searchMax; m++)
             {
+                if (m == bestRow)
+                    continue;
+
                 long sad = ComputeSad(last, tStart, frame.Bgra, m, h, stride, bestSad);
                 if (sad < bestSad || (sad == bestSad && m > bestRow))
                 {
@@ -250,8 +288,8 @@ public sealed class ScrollStitcher : IDisposable
     }
 
     /// <summary>
-    /// 粗扫一小部分候选行，给后续完整 SAD 搜索提供较低的初始 bestSad。
-    /// 完整搜索仍会遍历所有候选，所以该步骤只影响速度，不改变匹配结果。
+    /// 使用更稀疏的行/列采样粗评估全部候选行，再对粗匹配行做一次完整 SAD。
+    /// 后续完整搜索仍会遍历所有候选，所以该步骤只影响速度，不改变匹配结果。
     /// </summary>
     private void SeedBestMatchFromCoarsePass(
         byte[] last,
@@ -263,29 +301,91 @@ public sealed class ScrollStitcher : IDisposable
         ref long bestSad,
         ref int bestRow)
     {
-        if (searchMax < 64)
+        if (searchMax < 16)
             return;
 
-        int step = Math.Clamp(searchMax / 32, 4, 32);
-        for (int m = searchMax; m >= 0; m -= step)
+        long bestCoarseSad = long.MaxValue;
+        int bestCoarseRow = 0;
+        int coarseRowStep = Math.Max(RowSampleStep * 4, RowSampleStep);
+        int coarseColumnStepBytes = checked(ColumnSampleStep * PixelBuffer.BytesPerPixel * 4);
+
+        for (int m = searchMax; m >= 0; m--)
         {
-            long sad = ComputeSad(last, tStart, cand, m, h, stride, bestSad);
-            if (sad < bestSad || (sad == bestSad && m > bestRow))
+            long coarseSad = ComputeCoarseSad(
+                last,
+                tStart,
+                cand,
+                m,
+                h,
+                stride,
+                coarseRowStep,
+                coarseColumnStepBytes,
+                bestCoarseSad);
+            if (coarseSad < bestCoarseSad)
             {
-                bestSad = sad;
-                bestRow = m;
+                bestCoarseSad = coarseSad;
+                bestCoarseRow = m;
             }
         }
 
-        if (bestRow != 0)
+        bestSad = ComputeSad(last, tStart, cand, bestCoarseRow, h, stride, currentBest: long.MaxValue);
+        bestRow = bestCoarseRow;
+
+        for (int delta = 1; delta <= 2; delta++)
         {
-            long sad = ComputeSad(last, tStart, cand, 0, h, stride, bestSad);
-            if (sad < bestSad)
+            int before = bestCoarseRow - delta;
+            if (before >= 0)
             {
-                bestSad = sad;
-                bestRow = 0;
+                long sad = ComputeSad(last, tStart, cand, before, h, stride, bestSad);
+                if (sad < bestSad || (sad == bestSad && before > bestRow))
+                {
+                    bestSad = sad;
+                    bestRow = before;
+                }
+            }
+
+            int after = bestCoarseRow + delta;
+            if (after <= searchMax)
+            {
+                long sad = ComputeSad(last, tStart, cand, after, h, stride, bestSad);
+                if (sad < bestSad || (sad == bestSad && after > bestRow))
+                {
+                    bestSad = sad;
+                    bestRow = after;
+                }
             }
         }
+    }
+
+    private long ComputeCoarseSad(
+        byte[] last,
+        int tStart,
+        byte[] cand,
+        int candStart,
+        int h,
+        int stride,
+        int rowStep,
+        int colStepBytes,
+        long currentBest)
+    {
+        long sad = 0;
+        for (int row = 0; row < h; row += rowStep)
+        {
+            int lOff = (tStart + row) * stride;
+            int cOff = (candStart + row) * stride;
+            for (int xb = 0; xb < stride; xb += colStepBytes)
+            {
+                int li = lOff + xb;
+                int ci = cOff + xb;
+                sad += Math.Abs(last[li] - cand[ci]);
+                sad += Math.Abs(last[li + 1] - cand[ci + 1]);
+                sad += Math.Abs(last[li + 2] - cand[ci + 2]);
+                if (sad > currentBest)
+                    return long.MaxValue;
+            }
+        }
+
+        return sad;
     }
 
     private bool TryFindExactSampleMatch(
@@ -382,6 +482,9 @@ public sealed class ScrollStitcher : IDisposable
         byte[] cand, int candStart,
         int h, int stride, long currentBest)
     {
+        if (ColumnSampleStep == 1 && (Avx2.IsSupported || Sse2.IsSupported))
+            return ComputeSadContiguousBgrSimd(last, tStart, cand, candStart, h, stride, currentBest);
+
         const int EarlyAbandonCheckInterval = 32;
         long sad = 0;
         int bpp = PixelBuffer.BytesPerPixel;
@@ -407,6 +510,83 @@ public sealed class ScrollStitcher : IDisposable
             if (sad > currentBest)
                 return long.MaxValue; // 提前放弃
         }
+        return sad;
+    }
+
+    private long ComputeSadContiguousBgrSimd(
+        byte[] last,
+        int tStart,
+        byte[] cand,
+        int candStart,
+        int h,
+        int stride,
+        long currentBest)
+    {
+        long sad = 0;
+
+        for (int row = 0; row < h; row += RowSampleStep)
+        {
+            int lOff = (tStart + row) * stride;
+            int cOff = (candStart + row) * stride;
+            sad = ComputeSadRowContiguousBgrSimd(last, lOff, cand, cOff, stride, sad, currentBest);
+            if (sad > currentBest)
+                return long.MaxValue;
+        }
+
+        return sad;
+    }
+
+    private static long ComputeSadRowContiguousBgrSimd(
+        byte[] last,
+        int lOff,
+        byte[] cand,
+        int cOff,
+        int rowBytes,
+        long sad,
+        long currentBest)
+    {
+        int xb = 0;
+
+        if (Avx2.IsSupported)
+        {
+            for (; xb <= rowBytes - Vector256<byte>.Count; xb += Vector256<byte>.Count)
+            {
+                var left = Avx2.And(MemoryMarshal.Read<Vector256<byte>>(last.AsSpan(lOff + xb)), BgrMask256);
+                var right = Avx2.And(MemoryMarshal.Read<Vector256<byte>>(cand.AsSpan(cOff + xb)), BgrMask256);
+                var sums = Avx2.SumAbsoluteDifferences(left, right).AsUInt64();
+                sad += (long)sums.GetElement(0)
+                       + (long)sums.GetElement(1)
+                       + (long)sums.GetElement(2)
+                       + (long)sums.GetElement(3);
+                if (sad > currentBest)
+                    return long.MaxValue;
+            }
+        }
+
+        if (Sse2.IsSupported)
+        {
+            for (; xb <= rowBytes - Vector128<byte>.Count; xb += Vector128<byte>.Count)
+            {
+                var left = Sse2.And(MemoryMarshal.Read<Vector128<byte>>(last.AsSpan(lOff + xb)), BgrMask128);
+                var right = Sse2.And(MemoryMarshal.Read<Vector128<byte>>(cand.AsSpan(cOff + xb)), BgrMask128);
+                var sums = Sse2.SumAbsoluteDifferences(left, right).AsUInt64();
+                sad += (long)sums.GetElement(0) + (long)sums.GetElement(1);
+                if (sad > currentBest)
+                    return long.MaxValue;
+            }
+        }
+
+        for (; xb < rowBytes; xb += PixelBuffer.BytesPerPixel)
+        {
+            int li = lOff + xb;
+            int ci = cOff + xb;
+            sad += Math.Abs(last[li] - cand[ci]);         // B
+            sad += Math.Abs(last[li + 1] - cand[ci + 1]); // G
+            sad += Math.Abs(last[li + 2] - cand[ci + 2]); // R
+            if (sad > currentBest)
+                return long.MaxValue;
+        }
+
         return sad;
     }
 

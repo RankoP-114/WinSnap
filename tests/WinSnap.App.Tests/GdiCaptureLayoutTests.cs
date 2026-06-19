@@ -49,6 +49,15 @@ public class GdiCaptureLayoutTests
         Assert.True(attribute.SetLastError);
     }
 
+    [Fact]
+    public void CaptureRegionInto_RejectsTooSmallDestinationBeforeNativeCapture()
+    {
+        var ex = Assert.Throws<ArgumentException>(() =>
+            GdiCapture.CaptureRegionInto(0, 0, 2, 2, new byte[15]));
+
+        Assert.Equal("destinationBgra", ex.ParamName);
+    }
+
     private static Type GetNestedType(string name)
     {
         var type = typeof(GdiCapture).GetNestedType(name, BindingFlags.NonPublic);

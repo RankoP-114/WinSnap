@@ -36,6 +36,7 @@ public sealed class CaptureSession
     private readonly List<CaptureScreenWindow> _windows = new();
     private readonly UndoRedoStack _undo = new();
     private readonly byte[] _samplePixelBuffer = new byte[4];
+    private readonly bool _useTransparentLiveOverlay;
 
     private Point _dragStart;
     private Rect _selectionAtStart;
@@ -61,8 +62,9 @@ public sealed class CaptureSession
         CapturedImage captured,
         SessionMode sessionMode = SessionMode.Screenshot,
         string defaultSaveFormat = "png",
-        int jpegQuality = 90)
-        : this(ImagingHelper.ToBitmapSource(captured), sessionMode, defaultSaveFormat, jpegQuality)
+        int jpegQuality = 90,
+        bool useTransparentLiveOverlay = false)
+        : this(ImagingHelper.ToBitmapSource(captured), sessionMode, defaultSaveFormat, jpegQuality, useTransparentLiveOverlay)
     {
     }
 
@@ -70,7 +72,8 @@ public sealed class CaptureSession
         BitmapSource background,
         SessionMode sessionMode = SessionMode.Screenshot,
         string defaultSaveFormat = "png",
-        int jpegQuality = 90)
+        int jpegQuality = 90,
+        bool useTransparentLiveOverlay = false)
     {
         ArgumentNullException.ThrowIfNull(background);
         _background = background;
@@ -78,6 +81,7 @@ public sealed class CaptureSession
         _sessionMode = sessionMode;
         _defaultSaveFormat = NormalizeSaveFormat(defaultSaveFormat);
         _jpegQuality = Math.Clamp(jpegQuality, 1, 100);
+        _useTransparentLiveOverlay = useTransparentLiveOverlay;
     }
 
     public AnnotationDocument Document { get; } = new();
@@ -123,7 +127,7 @@ public sealed class CaptureSession
 
         foreach (var m in monitors)
         {
-            var window = new CaptureScreenWindow(this, m, _background);
+            var window = new CaptureScreenWindow(this, m, _background, _useTransparentLiveOverlay);
             window.FirstFrameRendered += OnWindowFirstFrameRendered;
             window.Closed += OnCaptureWindowClosed;
             _windows.Add(window);
@@ -154,12 +158,17 @@ public sealed class CaptureSession
             window.FirstFrameRendered -= OnWindowFirstFrameRendered;
             window.Reveal();
         }
+        ScreenWindowHelper.FlushDwm();
 
         var inputWindow = WindowUnderCursor() ?? _windows.FirstOrDefault();
-        inputWindow?.ActivateForInput();
-
         var (x, y) = ScreenWindowHelper.GetCursorPosition();
         PointerMove(new Point(x, y));
+        if (inputWindow is not null)
+        {
+            _ = inputWindow.Dispatcher.BeginInvoke(
+                new Action(inputWindow.ActivateForInput),
+                System.Windows.Threading.DispatcherPriority.ContextIdle);
+        }
     }
 
     private CaptureScreenWindow? WindowUnderCursor()

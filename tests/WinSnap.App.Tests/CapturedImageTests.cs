@@ -34,4 +34,27 @@ public class CapturedImageTests
 
         Assert.Equal(["first"], image.Diagnostics);
     }
+
+    [Fact]
+    public void Constructor_AllowsBufferLargerThanRequired()
+    {
+        var image = new CapturedImage(1, 1, new byte[8]);
+
+        Assert.Equal(1, image.Width);
+        Assert.Equal(1, image.Height);
+        Assert.Equal(8, image.PixelsBgra.Length);
+    }
+
+    [Fact]
+    public void Constructor_RejectsUndersizedBuffer()
+    {
+        Assert.Throws<ArgumentException>(() => new CapturedImage(2, 2, new byte[15]));
+    }
+
+    [Fact]
+    public void Constructor_RejectsNegativeSize()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CapturedImage(-1, 1, []));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CapturedImage(1, -1, []));
+    }
 }

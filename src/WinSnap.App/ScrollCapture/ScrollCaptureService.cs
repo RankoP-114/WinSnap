@@ -102,7 +102,7 @@ public sealed class ScrollCaptureService
         if (stitcher.CurrentHeight <= 0 || stitcher.Width <= 0)
             return null;
 
-        return ToBitmapSource(stitcher.BuildAndReset());
+        return stitcher.ExportAndReset(ToBitmapSource);
     }
 
     private static CapturedImage CaptureRegionOnDispatcher(
@@ -151,14 +151,17 @@ public sealed class ScrollCaptureService
         return new PixelBuffer(img.Width, img.Height, bgra);
     }
 
-    /// <summary>把拼接结果 <see cref="PixelBuffer"/> 转为可冻结的 WPF 位图（Bgra32, 96dpi）。</summary>
+    /// <summary>把拼接结果 <see cref="PixelBuffer"/> 转为可冻结的 WPF 位图（Bgr32, 96dpi）。</summary>
     private static BitmapSource ToBitmapSource(PixelBuffer buffer)
+        => ToBitmapSource(buffer.Width, buffer.Height, buffer.Bgra, buffer.Stride);
+
+    private static BitmapSource ToBitmapSource(int width, int height, byte[] bgra, int stride)
     {
         var bmp = BitmapSource.Create(
-            buffer.Width, buffer.Height,
+            width, height,
             96, 96,
-            PixelFormats.Bgra32, null,
-            buffer.Bgra, buffer.Stride);
+            PixelFormats.Bgr32, null,
+            bgra, stride);
         bmp.Freeze(); // 可跨线程、渲染更高效
         return bmp;
     }

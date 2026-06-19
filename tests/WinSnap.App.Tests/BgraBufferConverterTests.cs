@@ -67,6 +67,70 @@ public class BgraBufferConverterTests
     }
 
     [Fact]
+    public void CopyBgra8ToOpaqueBgra_HandlesVectorSizedRowsAndTailPixels()
+    {
+        const int width = 19;
+        byte[] source = new byte[width * 4];
+        byte[] destination = new byte[source.Length];
+        byte[] expected = new byte[source.Length];
+
+        for (int p = 0; p < width; p++)
+        {
+            int offset = p * 4;
+            source[offset] = (byte)(p + 1);
+            source[offset + 1] = (byte)(p + 2);
+            source[offset + 2] = (byte)(p + 3);
+            source[offset + 3] = (byte)p;
+
+            expected[offset] = source[offset];
+            expected[offset + 1] = source[offset + 1];
+            expected[offset + 2] = source[offset + 2];
+            expected[offset + 3] = 255;
+        }
+
+        BgraBufferConverter.CopyBgra8ToOpaqueBgra(
+            source,
+            sourceStride: source.Length,
+            destination,
+            width,
+            height: 1);
+
+        Assert.Equal(expected, destination);
+    }
+
+    [Fact]
+    public void CopyRgba8ToOpaqueBgra_HandlesVectorSizedRowsAndTailPixels()
+    {
+        const int width = 19;
+        byte[] source = new byte[width * 4];
+        byte[] destination = new byte[source.Length];
+        byte[] expected = new byte[source.Length];
+
+        for (int p = 0; p < width; p++)
+        {
+            int offset = p * 4;
+            source[offset] = (byte)(p + 1);
+            source[offset + 1] = (byte)(p + 2);
+            source[offset + 2] = (byte)(p + 3);
+            source[offset + 3] = (byte)p;
+
+            expected[offset] = source[offset + 2];
+            expected[offset + 1] = source[offset + 1];
+            expected[offset + 2] = source[offset];
+            expected[offset + 3] = 255;
+        }
+
+        BgraBufferConverter.CopyRgba8ToOpaqueBgra(
+            source,
+            sourceStride: source.Length,
+            destination,
+            width,
+            height: 1);
+
+        Assert.Equal(expected, destination);
+    }
+
+    [Fact]
     public void CopyBgra8ToOpaqueBgra_ZeroSizeDoesNothing()
     {
         byte[] destination = [1, 2, 3, 4];

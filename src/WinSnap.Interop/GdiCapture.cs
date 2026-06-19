@@ -20,8 +20,21 @@ public static class GdiCapture
     /// <summary>抓取虚拟桌面坐标系下的指定物理像素矩形。</summary>
     public static CapturedImage CaptureRegion(int x, int y, int width, int height)
     {
+        var buffer = new byte[GetRequiredBufferSize(width, height)];
+        CaptureRegionInto(x, y, width, height, buffer);
+        return new CapturedImage(width, height, buffer);
+    }
+
+    /// <summary>抓取虚拟桌面坐标系下的指定物理像素矩形，直接写入调用方提供的 BGRA 缓冲。</summary>
+    public static void CaptureRegionInto(int x, int y, int width, int height, byte[] destinationBgra)
+    {
         if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
         if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+        ArgumentNullException.ThrowIfNull(destinationBgra);
+        int requiredBytes = GetRequiredBufferSize(width, height);
+        if (destinationBgra.Length < requiredBytes)
+            throw new ArgumentException(
+                $"目标缓冲区太小，至少需要 {requiredBytes} 字节。", nameof(destinationBgra));
 
         IntPtr screenDc = NativeMethods.GetDC(IntPtr.Zero);
         if (screenDc == IntPtr.Zero)
@@ -52,9 +65,7 @@ public static class GdiCapture
             }
 
             int stride = checked(width * 4);
-            var buffer = new byte[checked(stride * height)];
-            Marshal.Copy(bits, buffer, 0, buffer.Length);
-            return new CapturedImage(width, height, buffer);
+            Marshal.Copy(bits, destinationBgra, 0, checked(stride * height));
         }
         finally
         {
@@ -67,6 +78,13 @@ public static class GdiCapture
             if (screenDc != IntPtr.Zero)
                 NativeMethods.ReleaseDC(IntPtr.Zero, screenDc);
         }
+    }
+
+    private static int GetRequiredBufferSize(int width, int height)
+    {
+        if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+        return checked(width * height * 4);
     }
 
     private static void ThrowLastWin32(string api)

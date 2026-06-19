@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using SharpGen.Runtime;
@@ -407,6 +408,9 @@ public static class DuplicationCapture
     private static byte[] BuildGdiBaseCanvas(int canvasW, int canvasH, List<string> diag)
     {
         long len = (long)canvasW * canvasH * 4;
+        if (len > int.MaxValue)
+            throw new InvalidOperationException($"GDI 基底过大：{canvasW}x{canvasH}。");
+
         try
         {
             var gdi = GdiCapture.CaptureVirtualScreen();
@@ -426,21 +430,32 @@ public static class DuplicationCapture
     private static byte[] BuildGdiRegionCanvas(int x, int y, int width, int height, List<string> diag)
     {
         long len = (long)width * height * 4;
+        if (len > int.MaxValue)
+            throw new InvalidOperationException($"GDI 区域基底过大：{width}x{height}。");
+        var canvas = new byte[(int)len];
+        FillGdiRegionCanvas(x, y, width, height, canvas, diag);
+        return canvas;
+    }
+
+    private static void FillGdiRegionCanvas(int x, int y, int width, int height, byte[] canvas, List<string> diag)
+    {
+        long len = (long)width * height * 4;
+        if (canvas.LongLength < len)
+            throw new ArgumentException("GDI 区域基底缓冲区太小。", nameof(canvas));
+
         try
         {
-            var gdi = GdiCapture.CaptureRegion(x, y, width, height);
-            if (gdi.Width == width && gdi.Height == height && gdi.PixelsBgra.LongLength == len)
-                return gdi.PixelsBgra;
-            diag.Add($"GDI 区域基底尺寸不符（{gdi.Width}x{gdi.Height} vs {width}x{height}），回退全黑基底。");
+            GdiCapture.CaptureRegionInto(x, y, width, height, canvas);
+            return;
         }
         catch (Exception ex)
         {
             diag.Add($"GDI 区域基底抓取失败（{ex.GetType().Name} {ex.Message}），回退全黑基底。");
         }
 
-        var black = new byte[len];
-        for (long i = 3; i < black.LongLength; i += 4) black[i] = 255;
-        return black;
+        Array.Clear(canvas, 0, checked((int)len));
+        for (long i = 3; i < len; i += 4)
+            canvas[i] = 255;
     }
 
     private static void CaptureOneOutput(
@@ -468,6 +483,7 @@ public static class DuplicationCapture
         }
 
         IDXGIOutputDuplication? duplication = null;
+        byte[]? rentedFrameBuffer = null;
         try
         {
             OutputDescription1 desc1 = output6.Description1;
@@ -563,7 +579,8 @@ public static class DuplicationCapture
 
                     if (!TryProcessFrame(device, context, frameResource, isHdr,
                             hdrSdrWhiteNits, hdrPeakNits,
-                            out byte[] bgra, out int texW, out int texH, diag, outputIndex))
+                            out byte[] bgra, out int texW, out int texH, diag, outputIndex,
+                            (w, h) => rentedFrameBuffer ??= ArrayPool<byte>.Shared.Rent(checked(w * h * 4))))
                     {
                         return;
                     }
@@ -593,6 +610,8 @@ public static class DuplicationCapture
         }
         finally
         {
+            if (rentedFrameBuffer is not null)
+                ArrayPool<byte>.Shared.Return(rentedFrameBuffer);
             duplication?.Dispose();
             output6.Dispose();
         }
@@ -773,6 +792,7 @@ public static class DuplicationCapture
         private readonly double _hdrPeakNits;
         private readonly List<RegionOutputCapture> _outputs;
         private readonly IReadOnlyList<string> _constructionDiagnostics;
+        private readonly ReusableRegionCanvas _canvasBuffers;
         private bool _disposed;
 
         internal RegionCaptureSession(
@@ -799,16 +819,24 @@ public static class DuplicationCapture
             _constructionDiagnostics = constructionDiagnostics.Count == 0
                 ? Array.Empty<string>()
                 : constructionDiagnostics.ToArray();
+            _canvasBuffers = new ReusableRegionCanvas(width, height);
         }
 
         public CapturedImage Capture()
+            => CaptureCore(null);
+
+        public CapturedImage CaptureReusable(CapturedImage? protectedFrame)
+            => CaptureCore(_canvasBuffers.Rent(protectedFrame));
+
+        private CapturedImage CaptureCore(byte[]? canvas)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
 
             var diag = _constructionDiagnostics.Count == 0
                 ? new List<string>()
                 : new List<string>(_constructionDiagnostics);
-            byte[] canvas = BuildGdiRegionCanvas(_x, _y, _width, _height, diag);
+            canvas ??= new byte[checked(_width * _height * 4)];
+            FillGdiRegionCanvas(_x, _y, _width, _height, canvas, diag);
             bool gdiBaseHasVisibleContent = CapturedImage.HasVisibleContent(_width, _height, canvas);
             if (!gdiBaseHasVisibleContent)
                 diag.Add("GDI 区域基底看起来全黑：将对 SDR 屏也尝试 Desktop Duplication。");
@@ -845,6 +873,57 @@ public static class DuplicationCapture
             foreach (var output in _outputs)
                 output.Dispose();
             _outputs.Clear();
+            _canvasBuffers.Dispose();
+            _disposed = true;
+        }
+    }
+
+    internal sealed class ReusableRegionCanvas : IDisposable
+    {
+        private readonly int _frameBytes;
+        private byte[]? _first;
+        private byte[]? _second;
+        private bool _disposed;
+
+        public ReusableRegionCanvas(int width, int height)
+        {
+            if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+            if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+            _frameBytes = checked(width * height * 4);
+        }
+
+        public byte[] Rent(CapturedImage? protectedFrame)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            _first ??= ArrayPool<byte>.Shared.Rent(_frameBytes);
+            if (!ReferenceEquals(protectedFrame?.PixelsBgra, _first))
+                return _first;
+
+            _second ??= ArrayPool<byte>.Shared.Rent(_frameBytes);
+            if (!ReferenceEquals(protectedFrame.PixelsBgra, _second))
+                return _second;
+
+            throw new InvalidOperationException("Desktop Duplication 区域双缓冲被同时占用。");
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            if (_first is not null)
+            {
+                ArrayPool<byte>.Shared.Return(_first);
+                _first = null;
+            }
+
+            if (_second is not null)
+            {
+                ArrayPool<byte>.Shared.Return(_second);
+                _second = null;
+            }
+
             _disposed = true;
         }
     }
@@ -867,6 +946,7 @@ public static class DuplicationCapture
         private uint _regionStagingWidth;
         private uint _regionStagingHeight;
         private Format _regionStagingFormat;
+        private byte[]? _patchBuffer;
         private bool _disposed;
 
         public uint OutputIndex { get; }
@@ -1000,7 +1080,8 @@ public static class DuplicationCapture
                             out int patchH,
                             diag,
                             OutputIndex,
-                            GetOrCreateRegionStaging))
+                            GetOrCreateRegionStaging,
+                            GetOrCreatePatchBuffer))
                     {
                         return;
                     }
@@ -1035,6 +1116,7 @@ public static class DuplicationCapture
 
             _regionStaging?.Dispose();
             _regionStaging = null;
+            ReturnPatchBuffer();
             _duplication?.Dispose();
             _output6.Dispose();
             _output.Dispose();
@@ -1075,6 +1157,26 @@ public static class DuplicationCapture
             _regionStagingHeight = targetHeight;
             _regionStagingFormat = sourceDescription.Format;
             return _regionStaging;
+        }
+
+        private byte[] GetOrCreatePatchBuffer(int width, int height)
+        {
+            int requiredBytes = checked(width * height * 4);
+            if (_patchBuffer is null || _patchBuffer.Length < requiredBytes)
+            {
+                ReturnPatchBuffer();
+                _patchBuffer = ArrayPool<byte>.Shared.Rent(requiredBytes);
+            }
+            return _patchBuffer;
+        }
+
+        private void ReturnPatchBuffer()
+        {
+            if (_patchBuffer is null)
+                return;
+
+            ArrayPool<byte>.Shared.Return(_patchBuffer);
+            _patchBuffer = null;
         }
     }
 
@@ -1127,7 +1229,9 @@ public static class DuplicationCapture
         double hdrSdrWhiteNits,
         double hdrPeakNits,
         out byte[] bgra, out int texW, out int texH,
-        List<string> diag, uint outputIndex)
+        List<string> diag,
+        uint outputIndex,
+        Func<int, int, byte[]>? patchBufferFactory = null)
     {
         bgra = Array.Empty<byte>();
         texW = 0;
@@ -1172,20 +1276,24 @@ public static class DuplicationCapture
                 {
                     // HDR 路径：FP16 scRGB（线性，(1,1,1)=80nits）→ ToneMapper → SDR BGRA8。
                     // 原色为 Rec.709，传 inputIsRec2020:false 跳过 Rec.2020→709 矩阵。
-                    bgra = MapScRgbFp16ToSdrBgra(
+                    bgra = GetOutputBuffer(texW, texH, patchBufferFactory);
+                    MapScRgbFp16ToSdrBgra(
                         map.DataPointer, (int)map.RowPitch, texW, texH,
                         hdrSdrWhiteNits, hdrPeakNits,
-                        inputIsRec2020: false);
+                        inputIsRec2020: false,
+                        bgra);
                 }
                 else if (srcDesc.Format is Format.B8G8R8A8_UNorm or Format.B8G8R8A8_UNorm_SRgb)
                 {
                     // SDR 路径：B8G8R8A8_UNorm 已是 sRGB 编码的 BGRA8，直接按行紧凑拷贝（无需 tone map），
                     // 即任务所述「SDR 屏直接请求 BGRA8」方案，完全原样还原 SDR 画面。Alpha 置不透明。
-                    bgra = ReadBgra8(map.DataPointer, (int)map.RowPitch, texW, texH);
+                    bgra = GetOutputBuffer(texW, texH, patchBufferFactory);
+                    ReadBgra8(map.DataPointer, (int)map.RowPitch, texW, texH, bgra);
                 }
                 else if (srcDesc.Format is Format.R8G8B8A8_UNorm or Format.R8G8B8A8_UNorm_SRgb)
                 {
-                    bgra = ReadRgba8AsBgra(map.DataPointer, (int)map.RowPitch, texW, texH);
+                    bgra = GetOutputBuffer(texW, texH, patchBufferFactory);
+                    ReadRgba8AsBgra(map.DataPointer, (int)map.RowPitch, texW, texH, bgra);
                 }
                 else
                 {
@@ -1222,7 +1330,8 @@ public static class DuplicationCapture
         out int texH,
         List<string> diag,
         uint outputIndex,
-        Func<Texture2DDescription, int, int, ID3D11Texture2D>? stagingFactory = null)
+        Func<Texture2DDescription, int, int, ID3D11Texture2D>? stagingFactory = null,
+        Func<int, int, byte[]>? patchBufferFactory = null)
     {
         bgra = Array.Empty<byte>();
         texW = 0;
@@ -1282,18 +1391,22 @@ public static class DuplicationCapture
             {
                 if (srcDesc.Format == Format.R16G16B16A16_Float)
                 {
-                    bgra = MapScRgbFp16ToSdrBgra(
+                    bgra = GetOutputBuffer(texW, texH, patchBufferFactory);
+                    MapScRgbFp16ToSdrBgra(
                         map.DataPointer, (int)map.RowPitch, texW, texH,
                         hdrSdrWhiteNits, hdrPeakNits,
-                        inputIsRec2020: false);
+                        inputIsRec2020: false,
+                        bgra);
                 }
                 else if (srcDesc.Format is Format.B8G8R8A8_UNorm or Format.B8G8R8A8_UNorm_SRgb)
                 {
-                    bgra = ReadBgra8(map.DataPointer, (int)map.RowPitch, texW, texH);
+                    bgra = GetOutputBuffer(texW, texH, patchBufferFactory);
+                    ReadBgra8(map.DataPointer, (int)map.RowPitch, texW, texH, bgra);
                 }
                 else if (srcDesc.Format is Format.R8G8B8A8_UNorm or Format.R8G8B8A8_UNorm_SRgb)
                 {
-                    bgra = ReadRgba8AsBgra(map.DataPointer, (int)map.RowPitch, texW, texH);
+                    bgra = GetOutputBuffer(texW, texH, patchBufferFactory);
+                    ReadRgba8AsBgra(map.DataPointer, (int)map.RowPitch, texW, texH, bgra);
                 }
                 else
                 {
@@ -1335,6 +1448,39 @@ public static class DuplicationCapture
             throw new InvalidOperationException($"HDR 帧过大，无法展开为 SDR 缓冲：{w}x{h}。");
 
         var dst = new byte[(int)byteCount];
+        MapScRgbFp16ToSdrBgra(
+            dataPtr,
+            rowPitch,
+            w,
+            h,
+            sdrWhiteNits,
+            hdrPeakNits,
+            inputIsRec2020,
+            dst);
+        return dst;
+    }
+
+    private static unsafe void MapScRgbFp16ToSdrBgra(
+        IntPtr dataPtr,
+        int rowPitch,
+        int w,
+        int h,
+        double sdrWhiteNits,
+        double hdrPeakNits,
+        bool inputIsRec2020,
+        byte[] dst)
+    {
+        if (sdrWhiteNits <= 0) throw new ArgumentOutOfRangeException(nameof(sdrWhiteNits));
+        if (hdrPeakNits <= 0) throw new ArgumentOutOfRangeException(nameof(hdrPeakNits));
+        if (w < 0) throw new ArgumentOutOfRangeException(nameof(w));
+        if (h < 0) throw new ArgumentOutOfRangeException(nameof(h));
+
+        long byteCount = (long)w * h * 4;
+        if (byteCount > int.MaxValue)
+            throw new InvalidOperationException($"HDR 帧过大，无法展开为 SDR 缓冲：{w}x{h}。");
+        if (dst.LongLength < byteCount)
+            throw new ArgumentException("HDR 输出缓冲区太小。", nameof(dst));
+
         var mapping = ToneMapper.CreateMappingParameters(
             sdrWhiteNits,
             hdrPeakNits,
@@ -1342,27 +1488,10 @@ public static class DuplicationCapture
         byte* basePtr = (byte*)dataPtr;
         for (int y = 0; y < h; y++)
         {
-            ushort* row = (ushort*)(basePtr + (long)y * rowPitch);
+            var row = new ReadOnlySpan<Half>((void*)(basePtr + (long)y * rowPitch), checked(w * 4));
             int dstRow = y * w * 4;
-            for (int x = 0; x < w; x++)
-            {
-                int sp = x * 4;
-                int dp = dstRow + sp;
-                var (b, g, r, a) = ToneMapper.MapScRgbPixelToSdrBgra(
-                    (float)BitConverter.UInt16BitsToHalf(row[sp + 0]),
-                    (float)BitConverter.UInt16BitsToHalf(row[sp + 1]),
-                    (float)BitConverter.UInt16BitsToHalf(row[sp + 2]),
-                    (float)BitConverter.UInt16BitsToHalf(row[sp + 3]),
-                    mapping);
-
-                dst[dp] = b;
-                dst[dp + 1] = g;
-                dst[dp + 2] = r;
-                dst[dp + 3] = a;
-            }
+            ToneMapper.MapScRgbHalfPixelsToSdrBgra(row, dst.AsSpan(dstRow, checked(w * 4)), mapping);
         }
-
-        return dst;
     }
 
     /// <summary>
@@ -1373,21 +1502,40 @@ public static class DuplicationCapture
     {
         int byteCount = checked(w * h * 4);
         var dst = new byte[byteCount];
+        ReadBgra8(dataPtr, rowPitch, w, h, dst);
+        return dst;
+    }
+
+    private static unsafe void ReadBgra8(IntPtr dataPtr, int rowPitch, int w, int h, byte[] dst)
+    {
+        int byteCount = checked(w * h * 4);
+        if (dst.Length < byteCount)
+            throw new ArgumentException("BGRA 输出缓冲区太小。", nameof(dst));
         int sourceBytes = h == 0 ? 0 : checked(((h - 1) * rowPitch) + (w * 4));
         var source = new ReadOnlySpan<byte>((void*)dataPtr, sourceBytes);
         BgraBufferConverter.CopyBgra8ToOpaqueBgra(source, rowPitch, dst, w, h);
-        return dst;
     }
 
     private static unsafe byte[] ReadRgba8AsBgra(IntPtr dataPtr, int rowPitch, int w, int h)
     {
         int byteCount = checked(w * h * 4);
         var dst = new byte[byteCount];
+        ReadRgba8AsBgra(dataPtr, rowPitch, w, h, dst);
+        return dst;
+    }
+
+    private static unsafe void ReadRgba8AsBgra(IntPtr dataPtr, int rowPitch, int w, int h, byte[] dst)
+    {
+        int byteCount = checked(w * h * 4);
+        if (dst.Length < byteCount)
+            throw new ArgumentException("RGBA 输出缓冲区太小。", nameof(dst));
         int sourceBytes = h == 0 ? 0 : checked(((h - 1) * rowPitch) + (w * 4));
         var source = new ReadOnlySpan<byte>((void*)dataPtr, sourceBytes);
         BgraBufferConverter.CopyRgba8ToOpaqueBgra(source, rowPitch, dst, w, h);
-        return dst;
     }
+
+    private static byte[] GetOutputBuffer(int width, int height, Func<int, int, byte[]>? patchBufferFactory)
+        => patchBufferFactory?.Invoke(width, height) ?? new byte[checked(width * height * 4)];
 
     /// <summary>
     /// 把一块屏的 BGRA8（紧凑 stride=w*4，top-down）拷入虚拟桌面画布的 (destX,destY) 处，做边界裁剪。

@@ -1,6 +1,3 @@
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
@@ -18,7 +15,7 @@ namespace WinSnap.Interop;
 /// ② 不主动写 <c>CF_BITMAP</c>：自写 HBITMAP 跨进程兼容性差，且会干扰读取优先级；
 /// ③ <c>CF_HDROP</c>：附带临时 PNG 文件路径，供"粘贴文件"的应用。
 /// </para>
-/// 本类不依赖 WPF，仅使用 Win32 + System.Drawing。
+/// 本类不依赖 WPF，仅使用 Win32。
 /// </summary>
 public static class ClipboardHelper
 {
@@ -102,53 +99,9 @@ public static class ClipboardHelper
         }
     }
 
-    /// <summary>将图像编码为 PNG 字节（BGRA → 不透明 Bitmap → PNG）。</summary>
-    public static byte[] EncodePng(CapturedImage image)
-    {
-        ArgumentNullException.ThrowIfNull(image);
-        using Bitmap bmp = ToOpaqueBitmap(image);
-        using var ms = new MemoryStream();
-        bmp.Save(ms, ImageFormat.Png);
-        return ms.ToArray();
-    }
-
     // ---------------------------------------------------------------------
     // 内部实现
     // ---------------------------------------------------------------------
-
-    /// <summary>把 32bpp BGRA(top-down, Alpha 未定义) 转为不透明 Bitmap（Format32bppRgb，Alpha=255）。</summary>
-    private static Bitmap ToOpaqueBitmap(CapturedImage image)
-    {
-        int width = image.Width, height = image.Height, stride = image.Stride;
-        var bmp = new Bitmap(width, height, PixelFormat.Format32bppRgb);
-        var rect = new Rectangle(0, 0, width, height);
-        BitmapData data = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
-        try
-        {
-            byte[] src = image.PixelsBgra;
-            int rowBytes = width * 4;
-            byte[] row = ArrayPool<byte>.Shared.Rent(rowBytes);
-            try
-            {
-                for (int y = 0; y < height; y++)
-                {
-                    Buffer.BlockCopy(src, y * stride, row, 0, rowBytes);
-                    for (int i = 3; i < rowBytes; i += 4)
-                        row[i] = 0xFF;
-                    Marshal.Copy(row, 0, data.Scan0 + y * data.Stride, rowBytes);
-                }
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(row);
-            }
-        }
-        finally
-        {
-            bmp.UnlockBits(data);
-        }
-        return bmp;
-    }
 
     /// <summary>
     /// 手写 CF_DIBV5：BITMAPV5HEADER(124B) + 32bpp BGRA 像素（bottom-up、Alpha=255）。

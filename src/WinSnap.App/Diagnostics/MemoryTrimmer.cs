@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -9,60 +11,72 @@ namespace WinSnap.App.Diagnostics;
 
 public static class MemoryTrimmer
 {
-    private const long ManagedHeapTrimThresholdBytes = 96L * 1024 * 1024;
-    private const long WorkingSetTrimThresholdBytes = 384L * 1024 * 1024;
+    private const long ManagedHeapTrimThresholdBytes = 48L * 1024 * 1024;
+    private const long WorkingSetTrimThresholdBytes = 192L * 1024 * 1024;
+    private const int HardTrimDelayMs = 650;
+    private const int SoftTrimDelayMs = 250;
     private static int _pending;
 
+    public static void TrimTransientCaptureBuffers()
+        => QueueTrim(force: false, trimWorkingSet: false, delayMs: SoftTrimDelayMs);
+
     public static void TrimAfterCapture()
+        => QueueTrim(force: true, trimWorkingSet: true, delayMs: HardTrimDelayMs);
+
+    private static void QueueTrim(bool force, bool trimWorkingSet, int delayMs)
     {
-        if (Interlocked.Exchange(ref _pending, 1) == 1)
+        if (!force && Interlocked.Exchange(ref _pending, 1) == 1)
             return;
+        if (force)
+            Volatile.Write(ref _pending, 1);
 
         var dispatcher = Application.Current?.Dispatcher;
         if (dispatcher is null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
         {
-            QueueTrimNow();
+            QueueTrimNow(force, trimWorkingSet);
             return;
         }
 
         try
         {
-            _ = dispatcher.BeginInvoke(new Action(() => StartIdleTimer(dispatcher)), DispatcherPriority.ApplicationIdle);
+            _ = dispatcher.BeginInvoke(
+                new Action(() => StartIdleTimer(dispatcher, force, trimWorkingSet, delayMs)),
+                DispatcherPriority.ApplicationIdle);
         }
         catch (Exception ex)
         {
             Log.Debug(ex, "调度截图会话后内存清理失败，改为后台直接清理");
-            QueueTrimNow();
+            QueueTrimNow(force, trimWorkingSet);
         }
     }
 
-    private static void StartIdleTimer(Dispatcher dispatcher)
+    private static void StartIdleTimer(Dispatcher dispatcher, bool force, bool trimWorkingSet, int delayMs)
     {
         if (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
         {
-            QueueTrimNow();
+            QueueTrimNow(force, trimWorkingSet);
             return;
         }
 
         var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle, dispatcher)
         {
-            Interval = TimeSpan.FromMilliseconds(250),
+            Interval = TimeSpan.FromMilliseconds(delayMs),
         };
         timer.Tick += (_, _) =>
         {
             timer.Stop();
-            QueueTrimNow();
+            QueueTrimNow(force, trimWorkingSet);
         };
         timer.Start();
     }
 
-    private static void QueueTrimNow()
+    private static void QueueTrimNow(bool force, bool trimWorkingSet)
     {
         _ = Task.Run(() =>
         {
             try
             {
-                TrimNow();
+                TrimNow(force, trimWorkingSet);
             }
             finally
             {
@@ -71,14 +85,15 @@ public static class MemoryTrimmer
         });
     }
 
-    private static void TrimNow()
+    private static void TrimNow(bool force, bool trimWorkingSet)
     {
         try
         {
             using var process = Process.GetCurrentProcess();
             long beforeManaged = GC.GetTotalMemory(forceFullCollection: false);
             long beforeWorkingSet = process.WorkingSet64;
-            if (beforeManaged < ManagedHeapTrimThresholdBytes &&
+            if (!force &&
+                beforeManaged < ManagedHeapTrimThresholdBytes &&
                 beforeWorkingSet < WorkingSetTrimThresholdBytes)
             {
                 Log.Debug(
@@ -88,13 +103,27 @@ public static class MemoryTrimmer
                 return;
             }
 
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false, compacting: false);
+            if (force)
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: force);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: force);
+            GC.WaitForPendingFinalizers();
+
+            if (trimWorkingSet && !EmptyWorkingSet(process.Handle))
+            {
+                int error = Marshal.GetLastPInvokeError();
+                Log.Debug("截图会话后工作集修剪失败：0x{Error:X8}", error);
+            }
 
             process.Refresh();
             long afterManaged = GC.GetTotalMemory(forceFullCollection: false);
             long afterWorkingSet = process.WorkingSet64;
             Log.Debug(
-                "截图会话后内存清理：托管堆 {ManagedBefore:N0} -> {ManagedAfter:N0}，工作集 {WorkingSetBefore:N0} -> {WorkingSetAfter:N0}",
+                "截图会话后内存清理：force={Force} trimWorkingSet={TrimWorkingSet}，托管堆 {ManagedBefore:N0} -> {ManagedAfter:N0}，工作集 {WorkingSetBefore:N0} -> {WorkingSetAfter:N0}",
+                force,
+                trimWorkingSet,
                 beforeManaged,
                 afterManaged,
                 beforeWorkingSet,
@@ -105,4 +134,8 @@ public static class MemoryTrimmer
             Log.Debug(ex, "截图会话后内存清理失败");
         }
     }
+
+    [DllImport("psapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EmptyWorkingSet(IntPtr hProcess);
 }

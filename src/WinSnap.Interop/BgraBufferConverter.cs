@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace WinSnap.Interop;
 
@@ -21,8 +23,7 @@ internal static class BgraBufferConverter
             ReadOnlySpan<uint> srcPixels = MemoryMarshal.Cast<byte, uint>(srcRow);
             Span<uint> dstPixels = MemoryMarshal.Cast<byte, uint>(dstRow);
 
-            for (int i = 0; i < srcPixels.Length; i++)
-                dstPixels[i] = srcPixels[i] | 0xFF000000u;
+            CopyBgraPixelsToOpaqueBgra(srcPixels, dstPixels);
         }
     }
 
@@ -43,14 +44,87 @@ internal static class BgraBufferConverter
             ReadOnlySpan<uint> srcPixels = MemoryMarshal.Cast<byte, uint>(srcRow);
             Span<uint> dstPixels = MemoryMarshal.Cast<byte, uint>(dstRow);
 
-            for (int i = 0; i < srcPixels.Length; i++)
+            CopyRgbaPixelsToOpaqueBgra(srcPixels, dstPixels);
+        }
+    }
+
+    private static void CopyBgraPixelsToOpaqueBgra(ReadOnlySpan<uint> source, Span<uint> destination)
+    {
+        int i = 0;
+        if (Avx2.IsSupported)
+        {
+            var alpha = Vector256.Create(0xFF000000u);
+            int vectorCount = Vector256<uint>.Count;
+            for (; i <= source.Length - vectorCount; i += vectorCount)
             {
-                uint rgba = srcPixels[i];
-                dstPixels[i] = 0xFF000000u
-                               | ((rgba & 0x000000FFu) << 16)
-                               | (rgba & 0x0000FF00u)
-                               | ((rgba & 0x00FF0000u) >> 16);
+                var vector = MemoryMarshal.Read<Vector256<uint>>(MemoryMarshal.AsBytes(source.Slice(i, vectorCount)));
+                var opaque = Avx2.Or(vector, alpha);
+                MemoryMarshal.Write(MemoryMarshal.AsBytes(destination.Slice(i, vectorCount)), in opaque);
             }
+        }
+
+        if (Sse2.IsSupported)
+        {
+            var alpha = Vector128.Create(0xFF000000u);
+            int vectorCount = Vector128<uint>.Count;
+            for (; i <= source.Length - vectorCount; i += vectorCount)
+            {
+                var vector = MemoryMarshal.Read<Vector128<uint>>(MemoryMarshal.AsBytes(source.Slice(i, vectorCount)));
+                var opaque = Sse2.Or(vector, alpha);
+                MemoryMarshal.Write(MemoryMarshal.AsBytes(destination.Slice(i, vectorCount)), in opaque);
+            }
+        }
+
+        for (; i < source.Length; i++)
+            destination[i] = source[i] | 0xFF000000u;
+    }
+
+    private static void CopyRgbaPixelsToOpaqueBgra(ReadOnlySpan<uint> source, Span<uint> destination)
+    {
+        int i = 0;
+        if (Avx2.IsSupported)
+        {
+            var redMask = Vector256.Create(0x000000FFu);
+            var greenMask = Vector256.Create(0x0000FF00u);
+            var blueMask = Vector256.Create(0x00FF0000u);
+            var alpha = Vector256.Create(0xFF000000u);
+            int vectorCount = Vector256<uint>.Count;
+            for (; i <= source.Length - vectorCount; i += vectorCount)
+            {
+                var rgba = MemoryMarshal.Read<Vector256<uint>>(MemoryMarshal.AsBytes(source.Slice(i, vectorCount)));
+                var red = Avx2.ShiftLeftLogical(Avx2.And(rgba, redMask), 16);
+                var green = Avx2.And(rgba, greenMask);
+                var blue = Avx2.ShiftRightLogical(Avx2.And(rgba, blueMask), 16);
+                var bgra = Avx2.Or(alpha, Avx2.Or(green, Avx2.Or(red, blue)));
+                MemoryMarshal.Write(MemoryMarshal.AsBytes(destination.Slice(i, vectorCount)), in bgra);
+            }
+        }
+
+        if (Sse2.IsSupported)
+        {
+            var redMask = Vector128.Create(0x000000FFu);
+            var greenMask = Vector128.Create(0x0000FF00u);
+            var blueMask = Vector128.Create(0x00FF0000u);
+            var alpha = Vector128.Create(0xFF000000u);
+            int vectorCount = Vector128<uint>.Count;
+            for (; i <= source.Length - vectorCount; i += vectorCount)
+            {
+                var rgba = MemoryMarshal.Read<Vector128<uint>>(MemoryMarshal.AsBytes(source.Slice(i, vectorCount)));
+                var red = Sse2.ShiftLeftLogical(Sse2.And(rgba, redMask), 16);
+                var green = Sse2.And(rgba, greenMask);
+                var blue = Sse2.ShiftRightLogical(Sse2.And(rgba, blueMask), 16);
+                var bgra = Sse2.Or(alpha, Sse2.Or(green, Sse2.Or(red, blue)));
+                MemoryMarshal.Write(MemoryMarshal.AsBytes(destination.Slice(i, vectorCount)), in bgra);
+            }
+        }
+
+        for (; i < source.Length; i++)
+        {
+            uint rgba = source[i];
+            destination[i] = 0xFF000000u
+                             | ((rgba & 0x000000FFu) << 16)
+                             | (rgba & 0x0000FF00u)
+                             | ((rgba & 0x00FF0000u) >> 16);
         }
     }
 

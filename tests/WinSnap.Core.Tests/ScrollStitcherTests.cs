@@ -1,3 +1,4 @@
+using System.Reflection;
 using WinSnap.Core.Primitives;
 using WinSnap.Core.Stitching;
 
@@ -127,6 +128,45 @@ public class ScrollStitcherTests
     }
 
     [Fact]
+    public void Append_WithoutOwnershipKeepsSnapshotWhenSourceMutates()
+    {
+        var img = MakeLongImage(100);
+        var stitcher = new ScrollStitcher();
+        var frame = Slice(img, 0, 100);
+        byte expectedBlue = frame.Bgra[0];
+
+        stitcher.Append(frame);
+        frame.Bgra[0] = unchecked((byte)(expectedBlue + 1));
+
+        var result = stitcher.Build();
+
+        Assert.Equal(expectedBlue, result.Bgra[0]);
+    }
+
+    [Fact]
+    public void ExportAndReset_ProvidesInternalBufferSynchronouslyAndClearsState()
+    {
+        var img = MakeLongImage(100);
+        var stitcher = new ScrollStitcher();
+        var frame = Slice(img, 0, 100);
+        stitcher.Append(frame, ownsFrame: true);
+
+        byte firstByte = stitcher.ExportAndReset((width, height, bgra, stride) =>
+        {
+            Assert.Equal(frame.Width, width);
+            Assert.Equal(frame.Height, height);
+            Assert.Equal(frame.Stride, stride);
+            Assert.Same(frame.Bgra, bgra);
+            return bgra[0];
+        });
+
+        Assert.Equal(frame.Bgra[0], firstByte);
+        Assert.Equal(0, stitcher.CurrentHeight);
+        Assert.Equal(0, stitcher.Width);
+        Assert.Equal(0, stitcher.FrameCount);
+    }
+
+    [Fact]
     public void Dispose_ClearsStateAndReleasesBuffers()
     {
         var img = MakeLongImage(100);
@@ -156,6 +196,46 @@ public class ScrollStitcherTests
     }
 
     [Fact]
+    public void Stitch_ColumnSampleStepOne_ReconstructsFullImage()
+    {
+        var img = MakeLongImage(240, seed: 13579);
+        var stitcher = new ScrollStitcher(templateHeight: 70, columnSampleStep: 1, rowSampleStep: 1);
+
+        stitcher.Append(Slice(img, 0, 140));
+        stitcher.Append(Slice(img, 55, 140));
+        stitcher.Append(Slice(img, 100, 140));
+
+        Assert.False(stitcher.LastMatchFailed);
+        Assert.Equal(240, stitcher.CurrentHeight);
+        AssertImagesEqual(img, stitcher.Build());
+    }
+
+    [Fact]
+    public void Sad_ColumnSampleStepOne_IgnoresAlphaChannel()
+    {
+        var stitcher = new ScrollStitcher(templateHeight: 1, columnSampleStep: 1, rowSampleStep: 1);
+        byte[] last = new byte[8 * PixelBuffer.BytesPerPixel];
+        byte[] cand = new byte[last.Length];
+
+        for (int p = 0; p < 8; p++)
+        {
+            int offset = p * PixelBuffer.BytesPerPixel;
+            last[offset] = cand[offset] = (byte)(10 + p);
+            last[offset + 1] = cand[offset + 1] = (byte)(20 + p);
+            last[offset + 2] = cand[offset + 2] = (byte)(30 + p);
+            last[offset + 3] = 0;
+            cand[offset + 3] = 255;
+        }
+
+        long sameBgrSad = InvokeComputeSad(stitcher, last, cand, h: 1, stride: last.Length, currentBest: long.MaxValue);
+        cand[0] += 3;
+        long changedBgrSad = InvokeComputeSad(stitcher, last, cand, h: 1, stride: last.Length, currentBest: long.MaxValue);
+
+        Assert.Equal(0, sameBgrSad);
+        Assert.Equal(3, changedBgrSad);
+    }
+
+    [Fact]
     public void Stitch_CoarseSeededSearch_KeepsCorrectOffsetWhenExactMatchFails()
     {
         var img = MakeLongImage(320);
@@ -170,6 +250,47 @@ public class ScrollStitcherTests
         Assert.Equal(70, stitcher.LastAppendedHeight);
         Assert.Equal(270, stitcher.CurrentHeight);
         AssertImagesEqual(Slice(img, 0, 270), stitcher.Build());
+    }
+
+    [Fact]
+    public void Stitch_CoarseSearchCanBeWrongButFineSearchKeepsExactBest()
+    {
+        var first = new PixelBuffer(Width, 8);
+        var second = new PixelBuffer(Width, 10);
+        Fill(first, new ColorRgba(3, 7, 11, 255));
+        Fill(second, new ColorRgba(210, 40, 90, 255));
+
+        // Template is first rows [4,8). Its exact best location in second is row 3,
+        // but second row 0 is crafted to win the coarse samples only.
+        for (int y = 0; y < 4; y++)
+        {
+            for (int x = 0; x < Width; x++)
+            {
+                var color = new ColorRgba((byte)(20 + y), (byte)(30 + x), (byte)(40 + y + x), 255);
+                first.SetPixel(x, 4 + y, color);
+                second.SetPixel(x, 3 + y, color);
+            }
+        }
+
+        var nearBest = second.GetPixel(0, 3);
+        second.SetPixel(0, 3, new ColorRgba((byte)(nearBest.R + 1), nearBest.G, nearBest.B, nearBest.A));
+
+        for (int x = 0; x < Width; x += 4)
+            second.SetPixel(x, 0, first.GetPixel(x, 4));
+
+        var stitcher = new ScrollStitcher(
+            templateHeight: 4,
+            columnSampleStep: 1,
+            rowSampleStep: 1,
+            bottomThreshold: 0,
+            maxAverageSadPerChannel: 255);
+
+        stitcher.Append(first);
+        stitcher.Append(second);
+
+        Assert.False(stitcher.LastMatchFailed);
+        Assert.Equal(3, stitcher.LastAppendedHeight);
+        Assert.Equal(11, stitcher.CurrentHeight);
     }
 
     [Fact]
@@ -308,5 +429,26 @@ public class ScrollStitcherTests
         f.BlitRows(header, 0, 0, headerH);
         f.BlitRows(body, bodyStart, headerH, bodyH);
         return f;
+    }
+
+    private static void Fill(PixelBuffer buffer, ColorRgba color)
+    {
+        for (int y = 0; y < buffer.Height; y++)
+            for (int x = 0; x < buffer.Width; x++)
+                buffer.SetPixel(x, y, color);
+    }
+
+    private static long InvokeComputeSad(
+        ScrollStitcher stitcher,
+        byte[] last,
+        byte[] cand,
+        int h,
+        int stride,
+        long currentBest)
+    {
+        var method = typeof(ScrollStitcher).GetMethod("ComputeSad", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        object? result = method.Invoke(stitcher, [last, 0, cand, 0, h, stride, currentBest]);
+        return Assert.IsType<long>(result);
     }
 }

@@ -250,6 +250,124 @@ public class ToneMapperTests
     }
 
     [Fact]
+    public void DestinationOverload_MatchesAllocatingMapperAndDoesNotOverwriteTail()
+    {
+        var mapper = new ToneMapper();
+        float[] pixels =
+        [
+            2.4f, 1.2f, 0.35f, 0.75f,
+            0.1f, 0.4f, 1.6f, 1.0f,
+        ];
+        byte[] expected = mapper.MapToSdrBgra(
+            pixels,
+            width: 2,
+            height: 1,
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+        byte[] destination = Enumerable.Repeat((byte)0xCC, expected.Length + 4).ToArray();
+
+        mapper.MapToSdrBgra(
+            pixels,
+            destination,
+            width: 2,
+            height: 1,
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+
+        Assert.Equal(expected, destination[..expected.Length]);
+        Assert.Equal([0xCC, 0xCC, 0xCC, 0xCC], destination[expected.Length..]);
+    }
+
+    [Fact]
+    public void PrecomputedBulkMapper_MatchesAllocatingMapper()
+    {
+        var mapper = new ToneMapper();
+        float[] pixels =
+        [
+            0.2f, 0.3f, 0.4f, 1.0f,
+            3.0f, 0.5f, 0.25f, 0.5f,
+            0.0f, float.PositiveInfinity, float.NaN, 1.0f,
+        ];
+        byte[] expected = mapper.MapToSdrBgra(
+            pixels,
+            width: 3,
+            height: 1,
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+        byte[] destination = new byte[expected.Length];
+        var parameters = ToneMapper.CreateMappingParameters(
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+
+        ToneMapper.MapScRgbPixelsToSdrBgra(pixels, destination, parameters);
+
+        Assert.Equal(expected, destination);
+    }
+
+    [Fact]
+    public void HalfBulkMapper_MatchesFloatBulkMapperAndDoesNotOverwriteTail()
+    {
+        var mapper = new ToneMapper();
+        Half[] halfPixels =
+        [
+            (Half)0.25f, (Half)0.50f, (Half)1.00f, (Half)1.00f,
+            (Half)3.00f, (Half)0.75f, (Half)0.10f, (Half)0.50f,
+        ];
+        float[] floatPixels = halfPixels.Select(static v => (float)v).ToArray();
+        byte[] expected = mapper.MapToSdrBgra(
+            floatPixels,
+            width: 2,
+            height: 1,
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+        byte[] destination = Enumerable.Repeat((byte)0xCC, expected.Length + 4).ToArray();
+        var parameters = ToneMapper.CreateMappingParameters(
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+
+        ToneMapper.MapScRgbHalfPixelsToSdrBgra(halfPixels, destination, parameters);
+
+        Assert.Equal(expected, destination[..expected.Length]);
+        Assert.Equal([0xCC, 0xCC, 0xCC, 0xCC], destination[expected.Length..]);
+    }
+
+    [Fact]
+    public void HalfBulkMapper_HandlesNonFiniteValuesLikeFloatPath()
+    {
+        var mapper = new ToneMapper();
+        Half[] halfPixels =
+        [
+            Half.PositiveInfinity, Half.PositiveInfinity, Half.PositiveInfinity, Half.One,
+            Half.NaN, Half.NaN, Half.NaN, Half.One,
+        ];
+        float[] floatPixels = halfPixels.Select(static v => (float)v).ToArray();
+        byte[] expected = mapper.MapToSdrBgra(
+            floatPixels,
+            width: 2,
+            height: 1,
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+        byte[] destination = new byte[expected.Length];
+        var parameters = ToneMapper.CreateMappingParameters(
+            sdrWhiteNits: 300,
+            hdrPeakNits: 1000,
+            inputIsRec2020: false);
+
+        ToneMapper.MapScRgbHalfPixelsToSdrBgra(halfPixels, destination, parameters);
+
+        Assert.Equal(expected, destination);
+        Assert.True(destination[2] >= 250);
+        Assert.Equal(0, destination[6]);
+    }
+
+    [Fact]
     public void PrecomputedParameters_SaturatedWhiteMapsTo255()
     {
         var parameters = ToneMapper.CreateMappingParameters(
@@ -268,5 +386,36 @@ public class ToneMapperTests
         Assert.Equal(255, pixel.G);
         Assert.Equal(255, pixel.B);
         Assert.Equal(255, pixel.A);
+    }
+
+    [Fact]
+    public void SrgbOetfLookup_StaysWithinOneCodeValueOfReferenceFormula()
+    {
+        var mapper = new ToneMapper();
+        double[] linearValues = [0.0, 0.001, 0.0031308, 0.01, 0.18, 0.5, 0.95];
+
+        foreach (double linear in linearValues)
+        {
+            var mapped = mapper.MapToSdrBgra(
+                OnePixel((float)linear, (float)linear, (float)linear),
+                1,
+                1,
+                sdrWhiteNits: ScrgbWhiteNits,
+                hdrPeakNits: ScrgbWhiteNits,
+                inputIsRec2020: false);
+            byte expected = ReferenceSrgbByte(linear);
+
+            Assert.InRange(Math.Abs(mapped[2] - expected), 0, 1);
+            Assert.Equal(mapped[2], mapped[1]);
+            Assert.Equal(mapped[1], mapped[0]);
+        }
+    }
+
+    private static byte ReferenceSrgbByte(double linear)
+    {
+        double encoded = linear <= 0.0031308
+            ? 12.92 * linear
+            : (1.055 * Math.Pow(linear, 1.0 / 2.4)) - 0.055;
+        return (byte)Math.Clamp((int)((encoded * 255.0) + 0.5), 0, 255);
     }
 }

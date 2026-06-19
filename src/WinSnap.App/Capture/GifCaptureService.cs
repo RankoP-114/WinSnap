@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.IO;
 using Serilog;
@@ -41,6 +42,7 @@ public sealed class GifCaptureService
             hdrActive, foregroundFullscreen, options.HdrSdrWhiteLevelNits, options.HdrPeakNits);
 
         using var encoder = new StreamingGifEncoder(outputPath, width, height);
+        using var gdiFrameBuffers = new ReusableGdiFrameBuffers(width, height);
         int lastRemainingSeconds = options.DurationSeconds;
         remainingSecondsProgress?.Report(lastRemainingSeconds);
         bool? useDuplication = null;
@@ -57,7 +59,8 @@ public sealed class GifCaptureService
             : null;
 
         CapturedImage previous = CaptureFrame(
-            x, y, width, height, options, duplicationSession, preferDuplication, allowDuplicationFallback, ref useDuplication);
+            x, y, width, height, options, duplicationSession, preferDuplication, allowDuplicationFallback,
+            gdiFrameBuffers, protectedFrame: null, ref useDuplication);
         TimeSpan previousAt = TimeSpan.Zero;
         TimeSpan nextFrameAt = interval;
 
@@ -85,7 +88,8 @@ public sealed class GifCaptureService
             }
 
             var captured = CaptureFrame(
-                x, y, width, height, options, duplicationSession, preferDuplication, allowDuplicationFallback, ref useDuplication);
+                x, y, width, height, options, duplicationSession, preferDuplication, allowDuplicationFallback,
+                gdiFrameBuffers, previous, ref useDuplication);
             TimeSpan capturedAt = stopwatch.Elapsed;
             encoder.WriteFrame(previous, ToDelayHundredths(capturedAt - previousAt, interval));
             frameCount++;
@@ -124,13 +128,15 @@ public sealed class GifCaptureService
         DuplicationCapture.RegionCaptureSession? duplicationSession,
         bool preferDuplication,
         bool allowDuplicationFallback,
+        ReusableGdiFrameBuffers gdiFrameBuffers,
+        CapturedImage? protectedFrame,
         ref bool? useDuplication)
     {
         if (useDuplication == true || preferDuplication)
         {
             try
             {
-                var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession);
+                var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession, protectedFrame);
                 if (preferDuplication || duplicated.HasVisibleContent())
                 {
                     useDuplication = true;
@@ -148,14 +154,14 @@ public sealed class GifCaptureService
         CapturedImage gdi;
         try
         {
-            gdi = GdiCapture.CaptureRegion(x, y, width, height);
+            gdi = CaptureGdiFrame(x, y, width, height, gdiFrameBuffers, protectedFrame);
         }
         catch (Exception ex)
         {
             Log.Debug(ex, "GIF GDI 区域抓取失败，尝试 Desktop Duplication 兜底。");
             try
             {
-                var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession);
+                var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession, protectedFrame);
                 useDuplication = true;
                 Log.Information("GIF 录制已从 GDI 切换到 Desktop Duplication 兜底。");
                 return duplicated;
@@ -176,7 +182,7 @@ public sealed class GifCaptureService
 
         try
         {
-            var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession);
+            var duplicated = CaptureFrameWithDuplication(x, y, width, height, options, duplicationSession, protectedFrame);
             if (duplicated.HasVisibleContent())
             {
                 useDuplication = true;
@@ -193,14 +199,28 @@ public sealed class GifCaptureService
         return gdi;
     }
 
+    private static CapturedImage CaptureGdiFrame(
+        int x,
+        int y,
+        int width,
+        int height,
+        ReusableGdiFrameBuffers gdiFrameBuffers,
+        CapturedImage? protectedFrame)
+    {
+        byte[] buffer = gdiFrameBuffers.Rent(protectedFrame);
+        GdiCapture.CaptureRegionInto(x, y, width, height, buffer);
+        return new CapturedImage(width, height, buffer);
+    }
+
     private static CapturedImage CaptureFrameWithDuplication(
         int x,
         int y,
         int width,
         int height,
         GifCaptureOptions options,
-        DuplicationCapture.RegionCaptureSession? duplicationSession)
-        => duplicationSession?.Capture()
+        DuplicationCapture.RegionCaptureSession? duplicationSession,
+        CapturedImage? protectedFrame)
+        => duplicationSession?.CaptureReusable(protectedFrame)
            ?? DuplicationCapture.CaptureRegionHdrAware(
                x,
                y,
@@ -242,6 +262,56 @@ public sealed class GifCaptureService
                && windowBottom >= monitor.Bottom - tolerancePx
                && window.Width >= monitor.Width - tolerancePx
                && window.Height >= monitor.Height - tolerancePx;
+    }
+
+    internal sealed class ReusableGdiFrameBuffers : IDisposable
+    {
+        private readonly int _frameBytes;
+        private byte[]? _first;
+        private byte[]? _second;
+        private bool _disposed;
+
+        public ReusableGdiFrameBuffers(int width, int height)
+        {
+            if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+            if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+            _frameBytes = checked(width * height * 4);
+        }
+
+        public byte[] Rent(CapturedImage? protectedFrame)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            _first ??= ArrayPool<byte>.Shared.Rent(_frameBytes);
+            if (!ReferenceEquals(protectedFrame?.PixelsBgra, _first))
+                return _first;
+
+            _second ??= ArrayPool<byte>.Shared.Rent(_frameBytes);
+            if (!ReferenceEquals(protectedFrame.PixelsBgra, _second))
+                return _second;
+
+            throw new InvalidOperationException("GIF GDI 帧双缓冲被同时占用。");
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            if (_first is not null)
+            {
+                ArrayPool<byte>.Shared.Return(_first);
+                _first = null;
+            }
+
+            if (_second is not null)
+            {
+                ArrayPool<byte>.Shared.Return(_second);
+                _second = null;
+            }
+
+            _disposed = true;
+        }
     }
 
     private sealed class StreamingGifEncoder : IDisposable
